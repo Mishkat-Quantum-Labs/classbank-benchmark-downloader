@@ -2,90 +2,130 @@
 
 Downloads English classroom recordings (audio/video) and CHAT transcriptions from [TalkBank's ClassBank](https://class.talkbank.org) for speech/NLP benchmarking.
 
-## Quick Start
-
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Download metadata (no auth needed for API queries)
-python download_metadata.py --output-dir ./dataset
-
-# 3. Download transcripts (requires free TalkBank account)
-python download_transcripts.py --output-dir ./dataset
-
-# 4. Download media files (requires free TalkBank account)
-python download_media.py --output-dir ./dataset
-
-# 5. Parse transcripts into benchmark-ready format
-python parse_chat.py --input-dir ./dataset/transcripts --output-dir ./dataset/parsed
-```
-
 ## Prerequisites
 
 1. **Python 3.8+**
 2. **Free TalkBank account** — Register at https://class.talkbank.org (click Login > New User)
 
-You can provide credentials via:
-- Command line: `--email your@email.com --password yourpass`
-- Environment variables: `TALKBANK_EMAIL` and `TALKBANK_PASSWORD`
-- Interactive prompt (default)
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+## Authentication
+
+All download scripts (transcripts and media) require a free TalkBank account. You can provide credentials in three ways:
+
+### Option 1: Command-line arguments
+```bash
+python download_transcripts.py --email your@email.com --password yourpass
+```
+
+### Option 2: Environment variables
+```bash
+export TALKBANK_EMAIL=your@email.com
+export TALKBANK_PASSWORD=yourpass
+python download_transcripts.py
+```
+
+On Windows:
+```cmd
+set TALKBANK_EMAIL=your@email.com
+set TALKBANK_PASSWORD=yourpass
+python download_transcripts.py
+```
+
+### Option 3: Interactive prompt (default)
+```bash
+python download_transcripts.py
+# Will prompt for email and password
+```
 
 ## Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `download_metadata.py` | Queries TalkBankDB API for corpus metadata, generates manifest and README |
-| `download_transcripts.py` | Downloads CHAT-format transcript archives for all 21 English corpora |
-| `download_media.py` | Downloads audio/video recordings with parallel downloads |
-| `download_classbank.py` | All-in-one script (transcripts + media + metadata) |
-| `parse_chat.py` | Parses CHAT transcripts into JSONL/CSV for benchmarking |
+| Script | Purpose | Auth Required |
+|--------|---------|---------------|
+| `download_metadata.py` | Queries TalkBankDB API, generates manifest and index | No (unless `--skip-api` is used) |
+| `download_transcripts.py` | Downloads CHAT-format transcript archives | Yes |
+| `download_media.py` | Downloads audio/video recordings (parallel) | Yes |
+| `parse_chat.py` | Parses CHAT transcripts into JSONL/CSV | No |
 
-## Usage Options
+## Usage
 
-### Download only transcripts (no media)
+### Download everything (all 21 corpora)
+
 ```bash
-python download_transcripts.py --output-dir ./dataset --corpora Bradford,Stevens
+# Step 1: Metadata (no auth needed)
+python download_metadata.py
+
+# Step 2: Transcripts
+python download_transcripts.py --email your@email.com --password yourpass
+
+# Step 3: Media
+python download_media.py --email your@email.com --password yourpass
+
+# Step 4: Parse into benchmark format
+python parse_chat.py
 ```
 
-### Download media for specific corpora with 10 parallel downloads
+### Download specific corpora only
+
+Each script accepts `--corpora` to target specific collections:
+
 ```bash
-python download_media.py --corpora APT,Bradford --parallel 10
+# Only Bradford and APT transcripts
+python download_transcripts.py --corpora Bradford,APT
+
+# Only media for small corpora
+python download_media.py --corpora Crowley,Roth,Warren
+
+# Metadata for specific corpora
+python download_metadata.py --corpora Bradford,Stevens,Curtis
 ```
 
-### Generate metadata without API queries
+### Media download with custom parallelism
+
+```bash
+# 10 parallel downloads (default is 5)
+python download_media.py --parallel 10
+
+# Single-threaded (slower but gentler on server)
+python download_media.py --parallel 1
+```
+
+### Custom output directory
+
+All scripts default to `./dataset`. Override with `--output-dir`:
+
+```bash
+python download_transcripts.py --output-dir /path/to/my/data
+python download_media.py --output-dir /path/to/my/data
+python download_metadata.py --output-dir /path/to/my/data
+```
+
+### Parse transcripts
+
+```bash
+# Parse all transcripts into JSONL + CSV
+python parse_chat.py --input-dir ./dataset/transcripts --output-dir ./dataset/parsed
+
+# Only time-aligned utterances (for ASR benchmarking)
+python parse_chat.py --input-dir ./dataset/transcripts --output-dir ./dataset/parsed --time-aligned-only
+
+# Output only JSONL (no CSV)
+python parse_chat.py --format jsonl
+```
+
+### Metadata without API queries
+
+If the TalkBankDB API is down or you just want a skeleton:
+
 ```bash
 python download_metadata.py --skip-api
 ```
 
-### Parse only time-aligned utterances (for ASR benchmarking)
-```bash
-python parse_chat.py --input-dir ./dataset/transcripts --output-dir ./dataset/parsed --time-aligned-only
-```
-
-## Dataset Structure (after download)
-
-```
-dataset/
-├── metadata/
-│   ├── corpus_manifest.json      # Full dataset manifest with API metadata
-│   └── transcripts_index.csv     # Index of all .cha files
-├── transcripts/
-│   ├── APT/                      # Academically Productive Talk
-│   ├── Bradford/                 # Cultural literacy interviews
-│   ├── Curtis/                   # Second-grade geometry (160 transcripts)
-│   └── ... (21 corpora total)
-├── media/
-│   ├── APT/                      # *.mp4, *.mp3
-│   ├── Bradford/                 # *.mp3 (audio only)
-│   └── ...
-└── parsed/
-    ├── utterances.jsonl          # One utterance per line
-    ├── utterances.csv            # Tabular format
-    └── file_metadata.json        # Per-file metadata
-```
-
-## Corpora Included (21 English ClassBank collections)
+## Available Corpora
 
 | Corpus | Description |
 |--------|-------------|
@@ -111,31 +151,35 @@ dataset/
 | TIMSS-Science | Science classroom recordings from multiple countries |
 | Warren | Teachers' discussion of gravity |
 
-## Parsed Output Format
+## Dataset Structure (after download)
 
-### JSONL (utterances.jsonl)
-```json
-{
-  "corpus": "Bradford",
-  "filename": "14.cha",
-  "utterance_id": 0,
-  "speaker_id": "CHI",
-  "speaker_role": "Target_Child",
-  "text_clean": "he was the first president",
-  "start_time_ms": 12345,
-  "end_time_ms": 15678,
-  "duration_ms": 3333,
-  "media_file": "14.mp3"
-}
+```
+dataset/
+├── metadata/
+│   ├── corpus_manifest.json      # Full dataset manifest
+│   └── transcripts_index.csv     # Index of all .cha files
+├── transcripts/
+│   ├── APT/
+│   ├── Bradford/
+│   ├── Curtis/
+│   └── ... (21 corpora)
+├── media/
+│   ├── APT/                      # *.mp4
+│   ├── Bradford/                 # *.mp3
+│   └── ...
+└── parsed/
+    ├── utterances.jsonl
+    ├── utterances.csv
+    └── file_metadata.json
 ```
 
 ## Benchmarking Use Cases
 
-- **ASR (Automatic Speech Recognition)**: Use time-aligned utterances with media files as ground truth
-- **Speaker Diarization**: Multiple speakers per recording with speaker IDs
-- **Classroom Discourse Analysis**: Rich speaker role annotations (Teacher, Student, etc.)
-- **Turn-taking Detection**: Timestamps enable overlap and gap analysis
-- **Educational NLP**: Transcript content for topic modeling, QA, summarization
+- **ASR**: Time-aligned utterances with media as ground truth
+- **Speaker Diarization**: Multiple speakers per recording with IDs
+- **Classroom Discourse Analysis**: Speaker role annotations (Teacher, Student, etc.)
+- **Turn-taking Detection**: Timestamps for overlap and gap analysis
+- **Educational NLP**: Topic modeling, QA, summarization
 
 ## License & Citation
 
