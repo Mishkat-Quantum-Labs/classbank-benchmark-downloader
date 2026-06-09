@@ -1,17 +1,17 @@
 """
-TalkBank ClassBank - Transcript Downloader
-==========================================
+TalkBank ClassBank - TIMSS Transcript Downloader
+=================================================
 
-Downloads CHAT-format transcript files from TalkBank's ClassBank collection.
+Downloads CHAT-format transcript files from TalkBank's TIMSS-Math and TIMSS-Science collections.
 
-Transcripts are available as zip files from:
-    https://talkbank.org/data/class/{corpus}?f=zip
+TIMSS data differs from other ClassBank corpora because transcripts are per-country zip files:
+    https://talkbank.org/data/class/TIMSS-{subject}/{country}?f=zip
 
 Requires a free TalkBank account (register at https://class.talkbank.org).
 Credentials are loaded from a .env file (see .env.example).
 
 Usage:
-    python download_transcripts.py [--output-dir ./dataset] [--corpora APT,Bradford]
+    python download_timss_transcripts.py [--output-dir ./dataset] [--subjects Math,Science] [--countries USA]
 """
 
 import os
@@ -34,19 +34,19 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-TRANSCRIPT_ZIP_URL = "https://talkbank.org/data/class/{corpus}?f=zip"
+TRANSCRIPT_ZIP_URL = "https://talkbank.org/data/class/TIMSS-{subject}/{country}?f=zip"
 
-ENGLISH_CORPORA = [
-    "APT", "Bradford", "CarlaJim", "CogInst", "Crowley", "Curtis",
-    "DISPEL", "Frederiksen", "Graesser", "Horowitz", "JLS", "Looney",
-    "MacWhinney", "Moschkovich", "Person", "Rahm", "Roth", "Stevens",
-    "TIMSS-Math", "TIMSS-Science", "Warren",
-]
+TIMSS_SUBJECTS = ["Math", "Science"]
+
+TIMSS_COUNTRIES = {
+    "Math": ["USA"],
+    "Science": ["USA"],
+}
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("download_transcripts.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("download_timss_transcripts.log")],
 )
 logger = logging.getLogger(__name__)
 
@@ -94,13 +94,13 @@ def create_session():
 # ---------------------------------------------------------------------------
 
 
-def download_transcripts(corpus, output_dir, session):
-    """Download and extract transcript zip for a corpus."""
-    transcript_dir = output_dir / "transcripts" / corpus
+def download_transcripts(subject, country, output_dir, session):
+    """Download and extract transcript zip for a TIMSS subject/country."""
+    transcript_dir = output_dir / "transcripts" / f"TIMSS-{subject}"
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    zip_url = TRANSCRIPT_ZIP_URL.format(corpus=corpus)
-    logger.info(f"Downloading: {corpus} from {zip_url}")
+    zip_url = TRANSCRIPT_ZIP_URL.format(subject=subject, country=country)
+    logger.info(f"Downloading: TIMSS-{subject}/{country} from {zip_url}")
 
     try:
         resp = session.get(zip_url, timeout=120)
@@ -114,27 +114,28 @@ def download_transcripts(corpus, output_dir, session):
         )
 
         if is_zip:
-            zip_path = transcript_dir / f"{corpus}.zip"
+            zip_path = transcript_dir / f"TIMSS-{subject}.zip"
             with open(zip_path, "wb") as f:
                 f.write(resp.content)
 
             try:
                 with zipfile.ZipFile(zip_path, "r") as zf:
                     zf.extractall(transcript_dir)
-                logger.info(f"  Extracted {corpus} transcripts")
+                logger.info(f"  Extracted TIMSS-{subject}/{country} transcripts")
                 zip_path.unlink()
             except zipfile.BadZipFile:
-                logger.warning(f"  Bad zip file for {corpus}")
+                logger.warning(f"  Bad zip file for TIMSS-{subject}/{country}")
             return True
         else:
             if "authModals" in resp.text or "Login" in resp.text[:500]:
-                logger.warning(f"  Auth required for {corpus} - check credentials")
+                logger.warning(f"  Auth required for TIMSS-{subject}/{country} - check credentials")
             else:
-                logger.warning(f"  Unexpected response for {corpus}: HTTP {resp.status_code}")
+                logger.warning(f"  Unexpected response for TIMSS-{subject}/{country}: "
+                               f"HTTP {resp.status_code}")
             return False
 
     except Exception as e:
-        logger.error(f"  Error downloading {corpus}: {e}")
+        logger.error(f"  Error downloading TIMSS-{subject}/{country}: {e}")
         return False
 
 
@@ -145,32 +146,56 @@ def download_transcripts(corpus, output_dir, session):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download CHAT transcripts from TalkBank ClassBank."
+        description="Download TIMSS CHAT transcripts from TalkBank ClassBank."
     )
     parser.add_argument("--output-dir", type=str, default="./dataset",
                         help="Output directory (default: ./dataset)")
-    parser.add_argument("--corpora", type=str, default=None,
-                        help="Comma-separated corpora to download (default: all)")
+    parser.add_argument("--subjects", type=str, default=None,
+                        help="Comma-separated subjects: Math,Science (default: both)")
+    parser.add_argument("--countries", type=str, default=None,
+                        help="Comma-separated countries (default: all available per subject)")
 
     args = parser.parse_args()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    corpora = [c.strip() for c in args.corpora.split(",")] if args.corpora else ENGLISH_CORPORA
-
-    logger.info(f"Output: {output_dir}")
-    logger.info(f"Corpora: {len(corpora)}")
+    subjects = [s.strip() for s in args.subjects.split(",")] if args.subjects else TIMSS_SUBJECTS
 
     session = create_session()
 
     results = {}
-    for corpus in tqdm(corpora, desc="Downloading transcripts"):
-        results[corpus] = download_transcripts(corpus, output_dir, session)
-        time.sleep(1)
+    for subject in subjects:
+        if subject not in TIMSS_COUNTRIES:
+            logger.warning(f"Unknown TIMSS subject: {subject}. Use Math or Science.")
+            continue
+
+        available_countries = TIMSS_COUNTRIES[subject]
+        if args.countries:
+            countries = [c.strip() for c in args.countries.split(",")]
+            for c in countries:
+                if c not in available_countries:
+                    logger.warning(f"  Country '{c}' not available for TIMSS-{subject}. "
+                                   f"Available: {', '.join(available_countries)}")
+            countries = [c for c in countries if c in available_countries]
+        else:
+            countries = available_countries
+
+        logger.info(f"=== TIMSS-{subject} ===")
+        logger.info(f"Countries: {', '.join(countries)}")
+
+        for country in tqdm(countries, desc=f"TIMSS-{subject} transcripts"):
+            key = f"TIMSS-{subject}/{country}"
+            results[key] = download_transcripts(subject, country, output_dir, session)
+            time.sleep(1)
 
     # Summary
     success = sum(1 for v in results.values() if v)
-    logger.info(f"Done: {success}/{len(corpora)} corpora downloaded successfully")
+    logger.info(f"Done: {success}/{len(results)} TIMSS country datasets downloaded successfully")
+
+    if results:
+        logger.info("Results:")
+        for key, status in results.items():
+            logger.info(f"  {key}: {'OK' if status else 'FAILED'}")
 
 
 if __name__ == "__main__":

@@ -15,40 +15,32 @@ pip install -r requirements.txt
 
 ## Authentication
 
-All download scripts (transcripts and media) require a free TalkBank account. You can provide credentials in three ways:
+All download scripts require a free TalkBank account. Credentials are loaded from a `.env` file in the project root.
 
-### Option 1: Command-line arguments
+### Create your `.env` file
+
 ```bash
-python download_transcripts.py --email your@email.com --password yourpass
+cp .env.example .env
 ```
 
-### Option 2: Environment variables
-```bash
-export TALKBANK_EMAIL=your@email.com
-export TALKBANK_PASSWORD=yourpass
-python download_transcripts.py
+Then edit `.env` with your credentials:
+
+```env
+TALKBANK_EMAIL=your@email.com
+TALKBANK_PASSWORD=yourpassword
 ```
 
-On Windows:
-```cmd
-set TALKBANK_EMAIL=your@email.com
-set TALKBANK_PASSWORD=yourpass
-python download_transcripts.py
-```
-
-### Option 3: Interactive prompt (default)
-```bash
-python download_transcripts.py
-# Will prompt for email and password
-```
+> **Note:** The `.env` file is gitignored and will never be committed. Do not share it.
 
 ## Scripts
 
 | Script | Purpose | Auth Required |
 |--------|---------|---------------|
-| `download_metadata.py` | Queries TalkBankDB API, generates manifest and index | No (unless `--skip-api` is used) |
+| `download_metadata.py` | Queries TalkBankDB API, generates manifest and index | No |
 | `download_transcripts.py` | Downloads CHAT-format transcript archives | Yes |
-| `download_media.py` | Downloads audio/video recordings (parallel) | Yes |
+| `download_media.py` | Downloads audio/video recordings | Yes |
+| `download_timss_transcripts.py` | Downloads TIMSS transcript archives (per-country) | Yes |
+| `download_timss_media.py` | Downloads TIMSS video recordings (per-country) | Yes |
 | `parse_chat.py` | Parses CHAT transcripts into JSONL/CSV | No |
 
 ## Usage
@@ -59,13 +51,19 @@ python download_transcripts.py
 # Step 1: Metadata (no auth needed)
 python download_metadata.py
 
-# Step 2: Transcripts
-python download_transcripts.py --email your@email.com --password yourpass
+# Step 2: Transcripts (non-TIMSS corpora)
+python download_transcripts.py
 
-# Step 3: Media
-python download_media.py --email your@email.com --password yourpass
+# Step 3: Media (non-TIMSS corpora)
+python download_media.py
 
-# Step 4: Parse into benchmark format
+# Step 4: TIMSS transcripts (English/USA only)
+python download_timss_transcripts.py
+
+# Step 5: TIMSS media (English/USA only)
+python download_timss_media.py
+
+# Step 6: Parse into benchmark format
 python parse_chat.py
 ```
 
@@ -84,15 +82,27 @@ python download_media.py --corpora Crowley,Roth,Warren
 python download_metadata.py --corpora Bradford,Stevens,Curtis
 ```
 
-### Media download with custom parallelism
+### TIMSS data (separate scripts)
+
+TIMSS data uses a different URL structure (per-country downloads). By default, only English (USA) data is downloaded:
 
 ```bash
-# 10 parallel downloads (default is 5)
-python download_media.py --parallel 10
+# Download TIMSS transcripts (USA only by default)
+python download_timss_transcripts.py
 
-# Single-threaded (slower but gentler on server)
-python download_media.py --parallel 1
+# Download TIMSS media (USA only by default)
+python download_timss_media.py
+
+# Only TIMSS-Math
+python download_timss_media.py --subjects Math
+
+# Specify different countries
+python download_timss_media.py --countries USA,Australia --subjects Math
 ```
+
+Available TIMSS countries:
+- **TIMSS-Math**: Australia, Czech, HongKong, Japan, Netherlands, Switzerland, USA
+- **TIMSS-Science**: Australia, Czech, Japan, Netherlands, USA
 
 ### Custom output directory
 
@@ -162,10 +172,14 @@ dataset/
 │   ├── APT/
 │   ├── Bradford/
 │   ├── Curtis/
-│   └── ... (21 corpora)
+│   ├── TIMSS-Math/               # USA transcripts
+│   ├── TIMSS-Science/            # USA transcripts
+│   └── ... (other corpora)
 ├── media/
 │   ├── APT/                      # *.mp4
 │   ├── Bradford/                 # *.mp3
+│   ├── TIMSS-Math/               # USA videos
+│   ├── TIMSS-Science/            # USA videos
 │   └── ...
 └── parsed/
     ├── utterances.jsonl
