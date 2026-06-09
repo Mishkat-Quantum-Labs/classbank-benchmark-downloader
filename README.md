@@ -2,6 +2,51 @@
 
 Downloads English classroom recordings (audio/video) and CHAT transcriptions from [TalkBank's ClassBank](https://class.talkbank.org), converts them to standardized JSON, and organizes them for speech/NLP benchmarking.
 
+## Quick Start: Clone to Complete Dataset
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/Mishkat-Quantum-Labs/classbank-benchmark-downloader.git
+cd classbank-benchmark-downloader
+
+# 2. Create and activate a virtual environment
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+# source venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Set up credentials (register free at https://class.talkbank.org first)
+cp .env.example .env
+# Edit .env with your TalkBank email and password
+
+# 5. Download transcripts (all corpora)
+python download_transcripts.py
+python download_timss_transcripts.py
+
+# 6. Download media (audio/video) — this takes a while (~10 GB total)
+python download_media.py --workers 4
+python download_timss_media.py --workers 4
+
+# 7. Run the preprocessor (converts .cha → JSON, runs verification)
+python preprocess_transcripts.py
+
+# 8. Separate warn files into data-limitation-set
+python separate_warn_files.py
+
+# 9. Run tests to confirm everything is good
+python -m pytest tests/ -v
+```
+
+After this, you'll have:
+- `dataset/` — 303 fully verified files (transcripts + JSON + media), all passing 6 quality checks
+- `data-limitation-set/` — 41 files with incomplete timestamps (valid JSON, but separated for reliability)
+
+> **Note:** Steps 5-6 download ~10 GB of media. Use `--corpora APT,Bradford` to download a subset for testing.
+
 ## Prerequisites
 
 1. **Python 3.8+**
@@ -51,6 +96,7 @@ TALKBANK_PASSWORD=yourpassword
 | `download_timss_transcripts.py` | Downloads TIMSS transcript archives (per-country) | Yes |
 | `download_timss_media.py` | Downloads TIMSS video recordings (per-country) | Yes |
 | `preprocess_transcripts.py` | Converts .cha → JSON with 6-check verification | No |
+| `separate_warn_files.py` | Moves warn files to data-limitation-set/ | No |
 
 ## Usage
 
