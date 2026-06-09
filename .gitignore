@@ -34,3 +34,4 @@ desktop.ini
 # Credentials / secrets
 .env
 .env.*
+!.env.example

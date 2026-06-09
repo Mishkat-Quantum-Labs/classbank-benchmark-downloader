@@ -1,17 +1,18 @@
 """
-TalkBank ClassBank - Media Downloader
-======================================
+TalkBank ClassBank - TIMSS Media Downloader
+=============================================
 
-Downloads audio/video recordings from TalkBank's ClassBank collection.
+Downloads video recordings from TalkBank's TIMSS-Math and TIMSS-Science collections.
 
-Media files are hosted at:
-    https://media.talkbank.org/class/{corpus}/
+TIMSS data is organized by country:
+    https://media.talkbank.org/class/TIMSS-Math/{country}/
+    https://media.talkbank.org/class/TIMSS-Science/{country}/
 
 Requires a free TalkBank account (register at https://class.talkbank.org).
 Credentials are loaded from a .env file (see .env.example).
 
 Usage:
-    python download_media.py [--output-dir ./dataset] [--corpora APT,Bradford]
+    python download_timss_media.py [--output-dir ./dataset] [--subjects Math,Science] [--countries USA]
 """
 
 import os
@@ -36,79 +37,21 @@ load_dotenv()
 
 MEDIA_EXTENSIONS = (".mp4", ".mp3", ".wav", ".m4v", ".m4a", ".avi", ".mov", ".m4b")
 
-# Corpora ordered by expected size (smallest first)
-# TIMSS-Math and TIMSS-Science handled by download_timss_media.py
-ENGLISH_CORPORA = [
-    "Bradford", "Horowitz", "Crowley", "Roth", "Warren", "Rahm",
-    "Stevens", "Frederiksen", "Moschkovich", "JLS", "Looney", "Person",
-    "CogInst", "Graesser", "MacWhinney", "DISPEL", "CarlaJim", "Curtis",
-    "APT",
-]
+TIMSS_SUBJECTS = ["Math", "Science"]
 
-# Mapping from access page names to actual media folder names
-CORPUS_NAME_MAP = {
-    "Cognition&Instruction": "CogInst",
-    "Greeno/VanDeSande": "CarlaJim",
+TIMSS_COUNTRIES = {
+    "Math": ["USA"],
+    "Science": ["USA"],
 }
 
-# TIMSS handled separately by download_timss_media.py
-SKIP_CORPORA = ["TIMSS-Math", "TIMSS-Science"]
+MEDIA_BASE_URL = "https://media.talkbank.org:443/class/TIMSS-{subject}/{country}/"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("download_media.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("download_timss_media.log")],
 )
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Corpus Discovery from Access Page
-# ---------------------------------------------------------------------------
-
-
-def get_corpora_from_access_page():
-    """Scrape the ClassBank access page to get the list of available corpora."""
-    url = "https://talkbank.org/class/access/index.html"
-    logger.info(f"Fetching corpus list from: {url}")
-
-    try:
-        resp = requests.get(url, timeout=30,
-                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        if resp.status_code != 200:
-            logger.warning(f"Could not fetch access page (HTTP {resp.status_code}), using fallback list.")
-            return ENGLISH_CORPORA
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        corpora = []
-
-        # Each corpus row has a link like <a href="APT.html">APT</a>
-        for link in soup.find_all("a"):
-            href = link.get("href", "")
-            if href.endswith(".html") and "/" not in href and href != "index.html":
-                corpus_name = link.get_text(strip=True)
-                if not corpus_name:
-                    continue
-
-                # Map display names to folder names
-                folder_name = CORPUS_NAME_MAP.get(corpus_name, corpus_name)
-
-                # Skip TIMSS (handled by separate script)
-                if folder_name in SKIP_CORPORA:
-                    continue
-
-                corpora.append(folder_name)
-
-        if corpora:
-            logger.info(f"  Found {len(corpora)} corpora on access page")
-            return corpora
-        else:
-            logger.warning("  No corpora found on access page, using fallback list.")
-            return ENGLISH_CORPORA
-
-    except Exception as e:
-        logger.warning(f"  Error fetching access page: {e}. Using fallback list.")
-        return ENGLISH_CORPORA
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +101,9 @@ def create_session():
 # ---------------------------------------------------------------------------
 
 
-def get_media_file_list(corpus, session):
-    """Scrape media file listing for a corpus from TalkBank media server."""
-    media_url = f"https://media.talkbank.org:443/class/{corpus}/"
+def get_media_file_list(subject, country, session):
+    """Scrape media file listing for a TIMSS subject/country."""
+    media_url = MEDIA_BASE_URL.format(subject=subject, country=country)
     logger.info(f"Fetching media listing: {media_url}")
 
     def is_media_file(href):
@@ -172,54 +115,48 @@ def get_media_file_list(corpus, session):
             return parts[0] + "://" + parts[1].replace("//", "/")
         return url
 
-    try:
-        resp = session.get(media_url, timeout=30)
-        if resp.status_code != 200:
-            logger.warning(f"  Cannot access media for {corpus}: HTTP {resp.status_code}")
+    def scrape_directory(dir_url, depth=0):
+        if depth > 3:
             return []
 
-        soup = BeautifulSoup(resp.text, "html.parser")
         files = []
-        subdirs = []
+        try:
+            resp = session.get(dir_url, timeout=30)
+            if resp.status_code != 200:
+                return []
 
-        for link in soup.find_all("a", href=True):
-            href = link["href"]
-            if "?f=save" in href:
-                continue
-            if "Parent" in link.get_text() or href == media_url:
-                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            subdirs = []
 
-            if is_media_file(href):
-                url = normalize_url(href) if href.startswith("http") else normalize_url(media_url.rstrip("/") + "/" + href.lstrip("/"))
-                files.append(url)
-            elif href.startswith("http") and not is_media_file(href):
-                base = f"https://media.talkbank.org:443/class/{corpus}"
-                if href.startswith(base) and href != media_url.rstrip("/"):
-                    subdirs.append(normalize_url(href.rstrip("/") + "/"))
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if "?f=save" in href:
+                    continue
+                if "Parent" in link.get_text() or href == dir_url:
+                    continue
 
-        # Recursively check subdirectories
-        for subdir_url in subdirs:
-            try:
+                if is_media_file(href):
+                    url = normalize_url(href) if href.startswith("http") else normalize_url(dir_url.rstrip("/") + "/" + href.lstrip("/"))
+                    files.append(url)
+                elif href.startswith("http") and not is_media_file(href):
+                    base = media_url.rstrip("/")
+                    if href.startswith(base) and href != dir_url.rstrip("/"):
+                        subdirs.append(normalize_url(href.rstrip("/") + "/"))
+
+            # Recursively check subdirectories
+            for subdir_url in subdirs:
                 time.sleep(0.2)
-                sub_resp = session.get(subdir_url, timeout=30)
-                if sub_resp.status_code == 200:
-                    sub_soup = BeautifulSoup(sub_resp.text, "html.parser")
-                    for sub_link in sub_soup.find_all("a", href=True):
-                        sub_href = sub_link["href"]
-                        if "?f=save" in sub_href:
-                            continue
-                        if is_media_file(sub_href):
-                            url = normalize_url(sub_href) if sub_href.startswith("http") else normalize_url(subdir_url.rstrip("/") + "/" + sub_href.lstrip("/"))
-                            files.append(url)
-            except Exception:
-                pass
+                files.extend(scrape_directory(subdir_url, depth + 1))
 
-        logger.info(f"  Found {len(files)} media files for {corpus}")
+        except Exception as e:
+            if depth == 0:
+                logger.error(f"  Error fetching {dir_url}: {e}")
+
         return files
 
-    except Exception as e:
-        logger.error(f"  Error fetching media listing for {corpus}: {e}")
-        return []
+    files = scrape_directory(media_url)
+    logger.info(f"  Found {len(files)} media files for TIMSS-{subject}/{country}")
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -286,12 +223,12 @@ def download_file(session, url, output_path):
         return False, output_path.name, str(e)[:80]
 
 
-def download_corpus_media(corpus, output_dir, session):
-    """Download all media files for a corpus sequentially."""
-    media_dir = output_dir / "media" / corpus
+def download_country_media(subject, country, output_dir, session):
+    """Download all media files for a TIMSS subject/country."""
+    media_dir = output_dir / "media" / f"TIMSS-{subject}"
     media_dir.mkdir(parents=True, exist_ok=True)
 
-    files = get_media_file_list(corpus, session)
+    files = get_media_file_list(subject, country, session)
     if not files:
         return 0
 
@@ -304,7 +241,7 @@ def download_corpus_media(corpus, output_dir, session):
     skipped = 0
     failed = 0
 
-    for url in tqdm(files, desc=f"  {corpus}", leave=False):
+    for url in tqdm(files, desc=f"  TIMSS-{subject}/{country}", leave=False):
         filename = url.split("/")[-1].split("?")[0]
         output_path = media_dir / filename
         success, name, info = download_file(session, url, output_path)
@@ -318,7 +255,7 @@ def download_corpus_media(corpus, output_dir, session):
             failed += 1
             logger.warning(f"    FAILED: {name} - {info}")
 
-    logger.info(f"  [{corpus}] {downloaded} new, {skipped} skipped, {failed} failed")
+    logger.info(f"  [TIMSS-{subject}/{country}] {downloaded} new, {skipped} skipped, {failed} failed")
     return downloaded
 
 
@@ -329,36 +266,57 @@ def download_corpus_media(corpus, output_dir, session):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download media files from TalkBank ClassBank."
+        description="Download TIMSS media files from TalkBank ClassBank."
     )
     parser.add_argument("--output-dir", type=str, default="./dataset",
                         help="Output directory (default: ./dataset)")
-    parser.add_argument("--corpora", type=str, default=None,
-                        help="Comma-separated corpora to download (default: all)")
+    parser.add_argument("--subjects", type=str, default=None,
+                        help="Comma-separated: Math,Science (default: both)")
+    parser.add_argument("--countries", type=str, default=None,
+                        help="Comma-separated countries (default: all per subject)")
 
     args = parser.parse_args()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    corpora = [c.strip() for c in args.corpora.split(",")] if args.corpora else get_corpora_from_access_page()
-
-    logger.info(f"Output: {output_dir}")
-    logger.info(f"Corpora: {len(corpora)}")
+    subjects = [s.strip() for s in args.subjects.split(",")] if args.subjects else TIMSS_SUBJECTS
 
     session = create_session()
 
     total_downloaded = 0
-    for corpus in corpora:
-        logger.info(f"--- {corpus} ---")
-        total_downloaded += download_corpus_media(corpus, output_dir, session)
-        time.sleep(1)
+    for subject in subjects:
+        if subject not in TIMSS_COUNTRIES:
+            logger.warning(f"Unknown TIMSS subject: {subject}. Use Math or Science.")
+            continue
+
+        available_countries = TIMSS_COUNTRIES[subject]
+        if args.countries:
+            countries = [c.strip() for c in args.countries.split(",")]
+            countries = [c for c in countries if c in available_countries]
+        else:
+            countries = available_countries
+
+        logger.info(f"=== TIMSS-{subject} ===")
+        logger.info(f"Countries: {', '.join(countries)}")
+
+        for country in countries:
+            logger.info(f"--- TIMSS-{subject}/{country} ---")
+            total_downloaded += download_country_media(
+                subject, country, output_dir, session
+            )
+            time.sleep(1)
 
     # Summary
-    total_files = sum(
-        1 for _ in (output_dir / "media").rglob("*")
-        if _.is_file() and _.stat().st_size > 100
-    ) if (output_dir / "media").exists() else 0
-    logger.info(f"Done: {total_files} total media files on disk")
+    timss_media_dir = output_dir / "media"
+    total_files = 0
+    for subject in TIMSS_SUBJECTS:
+        subject_dir = timss_media_dir / f"TIMSS-{subject}"
+        if subject_dir.exists():
+            total_files += sum(
+                1 for _ in subject_dir.rglob("*")
+                if _.is_file() and _.stat().st_size > 100
+            )
+    logger.info(f"Done: {total_files} total TIMSS media files on disk")
 
 
 if __name__ == "__main__":
