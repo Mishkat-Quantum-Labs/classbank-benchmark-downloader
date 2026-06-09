@@ -21,6 +21,7 @@ import time
 import argparse
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
@@ -286,8 +287,8 @@ def download_file(session, url, output_path):
         return False, output_path.name, str(e)[:80]
 
 
-def download_corpus_media(corpus, output_dir, session):
-    """Download all media files for a corpus sequentially."""
+def download_corpus_media(corpus, output_dir, session, workers=1):
+    """Download all media files for a corpus with configurable parallelism."""
     media_dir = output_dir / "media" / corpus
     media_dir.mkdir(parents=True, exist_ok=True)
 
@@ -304,19 +305,43 @@ def download_corpus_media(corpus, output_dir, session):
     skipped = 0
     failed = 0
 
-    for url in tqdm(files, desc=f"  {corpus}", leave=False):
-        filename = url.split("/")[-1].split("?")[0]
-        output_path = media_dir / filename
-        success, name, info = download_file(session, url, output_path)
-        if success:
-            if info == "skipped":
-                skipped += 1
+    if workers <= 1:
+        for url in tqdm(files, desc=f"  {corpus}", leave=False):
+            filename = url.split("/")[-1].split("?")[0]
+            output_path = media_dir / filename
+            success, name, info = download_file(session, url, output_path)
+            if success:
+                if info == "skipped":
+                    skipped += 1
+                else:
+                    downloaded += 1
+                    logger.info(f"    {name} ({info})")
             else:
-                downloaded += 1
-                logger.info(f"    {name} ({info})")
-        else:
-            failed += 1
-            logger.warning(f"    FAILED: {name} - {info}")
+                failed += 1
+                logger.warning(f"    FAILED: {name} - {info}")
+    else:
+        tasks = []
+        for url in files:
+            filename = url.split("/")[-1].split("?")[0]
+            output_path = media_dir / filename
+            tasks.append((url, output_path))
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(download_file, session, url, path): (url, path)
+                for url, path in tasks
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"  {corpus}", leave=False):
+                success, name, info = future.result()
+                if success:
+                    if info == "skipped":
+                        skipped += 1
+                    else:
+                        downloaded += 1
+                        logger.info(f"    {name} ({info})")
+                else:
+                    failed += 1
+                    logger.warning(f"    FAILED: {name} - {info}")
 
     logger.info(f"  [{corpus}] {downloaded} new, {skipped} skipped, {failed} failed")
     return downloaded
@@ -335,6 +360,8 @@ def main():
                         help="Output directory (default: ./dataset)")
     parser.add_argument("--corpora", type=str, default=None,
                         help="Comma-separated corpora to download (default: all)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel download threads (default: 1)")
 
     args = parser.parse_args()
     output_dir = Path(args.output_dir).resolve()
@@ -344,13 +371,14 @@ def main():
 
     logger.info(f"Output: {output_dir}")
     logger.info(f"Corpora: {len(corpora)}")
+    logger.info(f"Workers: {args.workers}")
 
     session = create_session()
 
     total_downloaded = 0
     for corpus in corpora:
         logger.info(f"--- {corpus} ---")
-        total_downloaded += download_corpus_media(corpus, output_dir, session)
+        total_downloaded += download_corpus_media(corpus, output_dir, session, workers=args.workers)
         time.sleep(1)
 
     # Summary
