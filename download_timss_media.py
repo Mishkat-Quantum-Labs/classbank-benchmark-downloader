@@ -165,21 +165,39 @@ def get_media_file_list(subject, country, session):
 # ---------------------------------------------------------------------------
 
 
-def download_file(session, url, output_path):
-    """Download a single media file with resume support."""
+def download_file(session, url, output_path, skip_files=None):
+    """Download a single media file with resume support.
+    
+    Args:
+        skip_files: Optional set of filenames to skip (e.g. files moved to data-limitation-set)
+    """
     try:
         if output_path.exists() and output_path.stat().st_size > 100:
             return True, output_path.name, "skipped"
 
+        # Skip files that exist in data-limitation-set
+        if skip_files and output_path.name in skip_files:
+            return True, output_path.name, "skipped"
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Probe to get total file size
-        resp = session.get(url, timeout=30)
+        # Use HEAD request to probe file size (avoids downloading the whole file)
+        resp = session.head(url, timeout=30, allow_redirects=True)
         if resp.status_code not in (200, 206):
-            return False, output_path.name, f"HTTP {resp.status_code}"
+            # Some servers don't support HEAD, fall back to Range: bytes=0-0
+            resp = session.get(url, headers={"Range": "bytes=0-0"}, timeout=30)
+            if resp.status_code not in (200, 206):
+                return False, output_path.name, f"HTTP {resp.status_code}"
 
+        # Determine total file size from headers
         content_range = resp.headers.get("content-range", "")
-        total_size = int(content_range.split("/")[-1]) if "/" in content_range else 0
+        if "/" in content_range:
+            total_size = int(content_range.split("/")[-1])
+        elif resp.headers.get("content-length"):
+            total_size = int(resp.headers["content-length"])
+        else:
+            total_size = 0
+
         if total_size < 100:
             return False, output_path.name, "empty file on server"
 
@@ -233,10 +251,28 @@ def download_country_media(subject, country, output_dir, session, workers=1):
     if not files:
         return 0
 
+    # Build set of files already in data-limitation-set (moved out due to quality issues)
+    # These should not be re-downloaded
+    limitation_dir = output_dir.parent / "data-limitation-set" / "dataset" / "media" / f"TIMSS-{subject}"
+    skip_files = set()
+    if limitation_dir.exists():
+        skip_files = {f.name for f in limitation_dir.iterdir() if f.is_file() and f.stat().st_size > 100}
+        if skip_files:
+            logger.info(f"  Skipping {len(skip_files)} files already in data-limitation-set")
+
     # Clean up 0-byte files from previous failed attempts
     for f in media_dir.iterdir():
         if f.is_file() and f.stat().st_size == 0:
             f.unlink()
+
+    # Clean up .tmp files for files that are in data-limitation-set
+    if skip_files:
+        for f in media_dir.iterdir():
+            if f.is_file() and f.suffix == ".tmp":
+                original_name = f.stem  # removes .tmp, leaves e.g. "CC11241819.mp4"
+                if original_name in skip_files:
+                    f.unlink()
+                    logger.info(f"  Cleaned up orphaned tmp: {f.name}")
 
     downloaded = 0
     skipped = 0
@@ -246,7 +282,7 @@ def download_country_media(subject, country, output_dir, session, workers=1):
         for url in tqdm(files, desc=f"  TIMSS-{subject}/{country}", leave=False):
             filename = url.split("/")[-1].split("?")[0]
             output_path = media_dir / filename
-            success, name, info = download_file(session, url, output_path)
+            success, name, info = download_file(session, url, output_path, skip_files)
             if success:
                 if info == "skipped":
                     skipped += 1
@@ -265,7 +301,7 @@ def download_country_media(subject, country, output_dir, session, workers=1):
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(download_file, session, url, path): (url, path)
+                executor.submit(download_file, session, url, path, skip_files): (url, path)
                 for url, path in tasks
             }
             for future in tqdm(as_completed(futures), total=len(futures), desc=f"  TIMSS-{subject}/{country}", leave=False):

@@ -9,27 +9,31 @@ A preprocessing pipeline that converts CHAT-format (.cha) classroom transcriptio
 - **Source**: TalkBank ClassBank (https://talkbank.org)
 - **Format**: CHAT (.cha) transcription files
 - **Location**: `dataset/transcripts/`
-- **Total files discovered**: 322 across 37 corpora
 
 ## Directory Structure
 
 ```
 benchmark_data_p/
-├── dataset/
-│   ├── transcripts/          # Source .cha files (281 clean files, 34 corpora)
-│   ├── parsed/               # Output JSON files
-│   │   ├── {Corpus}/         # Per-corpus subdirectories
-│   │   │   └── {file}.json   # Converted transcript
-│   │   ├── manifest.json     # Index of all converted files
-│   │   └── verification.json # Per-file quality report
-│   └── media/                # Associated audio/video files
-├── data-limitation-set/      # Files with source data limitations (moved out)
+├── dataset/                      # Clean, fully-verified data
+│   ├── transcripts/              # Source .cha files (303 files, 38 corpora)
+│   ├── parsed/                   # Output JSON files
+│   │   ├── {Corpus}/             # Per-corpus subdirectories
+│   │   │   └── {file}.json       # Converted transcript
+│   │   ├── manifest.json         # Index of all converted files
+│   │   └── verification.json     # Per-file quality report
+│   └── media/                    # Associated audio/video files
+├── data-limitation-set/          # Files with source data limitations (41 files)
 │   └── dataset/
-│       ├── transcripts/      # 41 .cha files with timestamp issues
-│       ├── parsed/           # Their converted JSON (still valid, just incomplete timestamps)
-│       └── media/            # Associated media (30 files)
-├── preprocess_transcripts.py # The conversion pipeline script
-└── tests/                    # Test suite (pytest + hypothesis)
+│       ├── transcripts/          # .cha files with timestamp issues
+│       ├── parsed/               # Their converted JSON (valid, just incomplete timestamps)
+│       └── media/                # Associated media (30 files)
+├── download_media.py             # Media downloader (skips data-limitation-set files)
+├── download_timss_media.py       # TIMSS media downloader (skips data-limitation-set files)
+├── download_transcripts.py       # Transcript downloader
+├── download_timss_transcripts.py # TIMSS transcript downloader
+├── download_metadata.py          # Metadata/manifest generator
+├── preprocess_transcripts.py     # The conversion pipeline script
+└── tests/                        # Test suite (pytest + hypothesis)
 ```
 
 ## How It Works
@@ -47,6 +51,18 @@ The pipeline runs as a single script with 5 stages:
 ```bash
 python preprocess_transcripts.py
 ```
+
+## Download Scripts: Smart Skip Logic
+
+The download scripts (`download_media.py`, `download_timss_media.py`) include smart skip logic:
+
+1. **Skips files already downloaded** — checks `dataset/media/{corpus}/{filename}` exists and is > 100 bytes
+2. **Skips files in data-limitation-set** — checks `data-limitation-set/dataset/media/{corpus}/` for files that were moved out due to quality issues
+3. **Uses HEAD requests for probing** — avoids downloading entire files just to check their size
+4. **Resume support** — partially downloaded `.tmp` files resume from their current byte offset
+5. **Cleans up orphaned .tmp files** — removes `.tmp` files that correspond to files already in data-limitation-set
+
+This prevents wasteful re-downloading of files that were intentionally separated.
 
 ## Output JSON Schema
 
@@ -90,21 +106,20 @@ Every converted file is verified against its source:
 
 ## Results
 
-### Clean Dataset (281 files)
+### Clean Dataset (303 files — all pass)
 
 | Metric | Value |
 |--------|-------|
-| Files | 281 |
-| Corpora | 34 |
-| Total segments | 65,455 |
-| Total duration | ~58.9 hours |
+| Files | 303 |
+| Corpora | 38 |
+| Total segments | 70,668 |
 | Pass rate | **100%** |
 | Warnings | 0 |
 | Failures | 0 |
 
-All 281 files pass every verification check.
+All 303 files pass every verification check.
 
-### Data Limitation Set (41 files moved out)
+### Data Limitation Set (41 files — warn status, moved out)
 
 These files were successfully converted but flagged because the **source .cha files have incomplete or missing timestamps**. This is a source data characteristic, not a pipeline bug.
 
@@ -147,6 +162,9 @@ Speaker codes from CHAT `@Participants` header are mapped to lowercase roles:
 ```
 pylangacq>=0.18.0
 tqdm>=4.65.0
+requests
+beautifulsoup4
+python-dotenv
 pytest>=7.0.0
 hypothesis>=6.0.0
 ```

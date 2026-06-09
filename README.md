@@ -1,6 +1,6 @@
-# TalkBank ClassBank Benchmark Dataset Downloader
+# TalkBank ClassBank Benchmark Dataset
 
-Downloads English classroom recordings (audio/video) and CHAT transcriptions from [TalkBank's ClassBank](https://class.talkbank.org) for speech/NLP benchmarking.
+Downloads English classroom recordings (audio/video) and CHAT transcriptions from [TalkBank's ClassBank](https://class.talkbank.org), converts them to standardized JSON, and organizes them for speech/NLP benchmarking.
 
 ## Prerequisites
 
@@ -32,6 +32,15 @@ TALKBANK_PASSWORD=yourpassword
 
 > **Note:** The `.env` file is gitignored and will never be committed. Do not share it.
 
+## Pipeline Overview
+
+```
+1. Download transcripts (.cha)     → dataset/transcripts/
+2. Download media (audio/video)    → dataset/media/
+3. Preprocess (CHA → JSON)        → dataset/parsed/
+4. Verification & separation       → warn files → data-limitation-set/
+```
+
 ## Scripts
 
 | Script | Purpose | Auth Required |
@@ -41,30 +50,30 @@ TALKBANK_PASSWORD=yourpassword
 | `download_media.py` | Downloads audio/video recordings | Yes |
 | `download_timss_transcripts.py` | Downloads TIMSS transcript archives (per-country) | Yes |
 | `download_timss_media.py` | Downloads TIMSS video recordings (per-country) | Yes |
-| `parse_chat.py` | Parses CHAT transcripts into JSONL/CSV | No |
+| `preprocess_transcripts.py` | Converts .cha → JSON with 6-check verification | No |
 
 ## Usage
 
-### Download everything (all 21 corpora)
+### Full pipeline
 
 ```bash
 # Step 1: Metadata (no auth needed)
 python download_metadata.py
 
-# Step 2: Transcripts (non-TIMSS corpora)
+# Step 2: Transcripts
 python download_transcripts.py
 
-# Step 3: Media (non-TIMSS corpora)
+# Step 3: Media
 python download_media.py
 
-# Step 4: TIMSS transcripts (English/USA only)
+# Step 4: TIMSS transcripts (USA only)
 python download_timss_transcripts.py
 
-# Step 5: TIMSS media (English/USA only)
+# Step 5: TIMSS media (USA only)
 python download_timss_media.py
 
-# Step 6: Parse into benchmark format
-python parse_chat.py
+# Step 6: Convert to JSON and verify
+python preprocess_transcripts.py
 ```
 
 ### Download specific corpora only
@@ -72,68 +81,124 @@ python parse_chat.py
 Each script accepts `--corpora` to target specific collections:
 
 ```bash
-# Only Bradford and APT transcripts
 python download_transcripts.py --corpora Bradford,APT
-
-# Only media for small corpora
 python download_media.py --corpora Crowley,Roth,Warren
-
-# Metadata for specific corpora
 python download_metadata.py --corpora Bradford,Stevens,Curtis
 ```
 
 ### TIMSS data (separate scripts)
 
-TIMSS data uses a different URL structure (per-country downloads). By default, only English (USA) data is downloaded:
-
 ```bash
-# Download TIMSS transcripts (USA only by default)
 python download_timss_transcripts.py
-
-# Download TIMSS media (USA only by default)
 python download_timss_media.py
-
-# Only TIMSS-Math
-python download_timss_media.py --subjects Math
-
-# Specify different countries
-python download_timss_media.py --countries USA,Australia --subjects Math
+python download_timss_media.py --subjects Math --countries USA,Australia
 ```
 
-Available TIMSS countries:
-- **TIMSS-Math**: Australia, Czech, HongKong, Japan, Netherlands, Switzerland, USA
-- **TIMSS-Science**: Australia, Czech, Japan, Netherlands, USA
-
 ### Custom output directory
-
-All scripts default to `./dataset`. Override with `--output-dir`:
 
 ```bash
 python download_transcripts.py --output-dir /path/to/my/data
 python download_media.py --output-dir /path/to/my/data
-python download_metadata.py --output-dir /path/to/my/data
 ```
 
-### Parse transcripts
+### Parallel downloads
 
 ```bash
-# Parse all transcripts into JSONL + CSV
-python parse_chat.py --input-dir ./dataset/transcripts --output-dir ./dataset/parsed
-
-# Only time-aligned utterances (for ASR benchmarking)
-python parse_chat.py --input-dir ./dataset/transcripts --output-dir ./dataset/parsed --time-aligned-only
-
-# Output only JSONL (no CSV)
-python parse_chat.py --format jsonl
+python download_media.py --workers 4
+python download_timss_media.py --workers 4
 ```
 
-### Metadata without API queries
+## Smart Skip Logic
 
-If the TalkBankDB API is down or you just want a skeleton:
+The download scripts automatically skip files that:
+- Already exist in `dataset/media/` (size > 100 bytes)
+- Were moved to `data-limitation-set/` (files with quality issues)
 
-```bash
-python download_metadata.py --skip-api
+This prevents re-downloading files that were intentionally separated. Partially downloaded `.tmp` files will resume from where they left off.
+
+## Dataset Structure
+
 ```
+benchmark_data_p/
+├── dataset/                      # Clean, verified data (303 files, all pass)
+│   ├── transcripts/              # Source .cha files
+│   │   ├── APT/                  # 32 files
+│   │   ├── Bradford/             # 7 files
+│   │   ├── Curtis/               # Multi-day recordings
+│   │   ├── TIMSS-Math/           # 22 files
+│   │   └── ... (38 corpora)
+│   ├── parsed/                   # Converted JSON output
+│   │   ├── {Corpus}/{file}.json  # Per-file JSON
+│   │   ├── manifest.json         # Index of all converted files
+│   │   └── verification.json     # Per-file quality report
+│   └── media/                    # Audio/video recordings
+│       ├── APT/                  # *.mp4
+│       ├── Bradford/             # *.mp3
+│       └── ...
+├── data-limitation-set/          # Files with source data limitations (41 files)
+│   └── dataset/
+│       ├── transcripts/          # .cha files with timestamp issues
+│       ├── parsed/               # Their JSON (valid, but incomplete timestamps)
+│       └── media/                # Associated media (30 files)
+├── download_media.py
+├── download_timss_media.py
+├── download_transcripts.py
+├── download_timss_transcripts.py
+├── download_metadata.py
+├── preprocess_transcripts.py
+└── tests/
+```
+
+## Output JSON Schema
+
+Each converted file in `dataset/parsed/` follows this structure:
+
+```json
+{
+  "metadata": {
+    "session_id": "roth-roth-a1b2c3d4",
+    "duration_seconds": 1234.567,
+    "language": "en",
+    "model": "cha_parser_v1",
+    "created_at": "2026-06-09T10:31:01Z",
+    "source": "dataset/transcripts/Roth/roth.cha",
+    "corpus": "Roth"
+  },
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 3.361,
+      "speaker": "teacher",
+      "text": "this is the photograph of the Saanich Peninsula"
+    }
+  ],
+  "full_text": "this is the photograph of the Saanich Peninsula..."
+}
+```
+
+## Verification (6 Quality Checks)
+
+Every converted file is verified against its source:
+
+| Check | Pass Criteria |
+|-------|---------------|
+| Utterance count | Source vs output: exact match |
+| Speaker mapping | All source speakers present |
+| Timestamp coverage | > 90% of segments have start+end |
+| Word count | ≤ 10% difference |
+| Timestamp validity | No negative times, end ≥ start |
+| Timestamp order | Non-decreasing start times |
+
+Files that **pass** all checks stay in `dataset/`. Files with **warnings** (typically low timestamp coverage due to source data) are moved to `data-limitation-set/`.
+
+## Data Limitation Set
+
+The 41 files in `data-limitation-set/` were successfully converted but have incomplete timestamps in the **source .cha files** (not a pipeline bug). They include:
+
+- **11 files with 0% timestamp coverage** — text-only transcripts (Curtis/overview, Person/b04)
+- **30 files with 62-90% coverage** — partially timed by original annotators (APT, TIMSS-Science, Stevens, etc.)
+
+The JSON output is correct — utterances without timestamps have `null` for start/end. They're separated because time-aligned downstream tools won't work reliably with them.
 
 ## Available Corpora
 
@@ -160,32 +225,6 @@ python download_metadata.py --skip-api
 | TIMSS-Math | Math classroom recordings from multiple countries |
 | TIMSS-Science | Science classroom recordings from multiple countries |
 | Warren | Teachers' discussion of gravity |
-
-## Dataset Structure (after download)
-
-```
-dataset/
-├── metadata/
-│   ├── corpus_manifest.json      # Full dataset manifest
-│   └── transcripts_index.csv     # Index of all .cha files
-├── transcripts/
-│   ├── APT/
-│   ├── Bradford/
-│   ├── Curtis/
-│   ├── TIMSS-Math/               # USA transcripts
-│   ├── TIMSS-Science/            # USA transcripts
-│   └── ... (other corpora)
-├── media/
-│   ├── APT/                      # *.mp4
-│   ├── Bradford/                 # *.mp3
-│   ├── TIMSS-Math/               # USA videos
-│   ├── TIMSS-Science/            # USA videos
-│   └── ...
-└── parsed/
-    ├── utterances.jsonl
-    ├── utterances.csv
-    └── file_metadata.json
-```
 
 ## Benchmarking Use Cases
 

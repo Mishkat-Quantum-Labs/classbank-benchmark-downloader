@@ -1,5 +1,6 @@
 # Dataset files (large, downloaded separately)
 dataset/
+data-limitation-set/
 
 # Python
 __pycache__/
