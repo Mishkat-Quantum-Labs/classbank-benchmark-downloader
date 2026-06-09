@@ -22,6 +22,7 @@ import time
 import argparse
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
@@ -223,8 +224,8 @@ def download_file(session, url, output_path):
         return False, output_path.name, str(e)[:80]
 
 
-def download_country_media(subject, country, output_dir, session):
-    """Download all media files for a TIMSS subject/country."""
+def download_country_media(subject, country, output_dir, session, workers=1):
+    """Download all media files for a TIMSS subject/country with configurable parallelism."""
     media_dir = output_dir / "media" / f"TIMSS-{subject}"
     media_dir.mkdir(parents=True, exist_ok=True)
 
@@ -241,19 +242,43 @@ def download_country_media(subject, country, output_dir, session):
     skipped = 0
     failed = 0
 
-    for url in tqdm(files, desc=f"  TIMSS-{subject}/{country}", leave=False):
-        filename = url.split("/")[-1].split("?")[0]
-        output_path = media_dir / filename
-        success, name, info = download_file(session, url, output_path)
-        if success:
-            if info == "skipped":
-                skipped += 1
+    if workers <= 1:
+        for url in tqdm(files, desc=f"  TIMSS-{subject}/{country}", leave=False):
+            filename = url.split("/")[-1].split("?")[0]
+            output_path = media_dir / filename
+            success, name, info = download_file(session, url, output_path)
+            if success:
+                if info == "skipped":
+                    skipped += 1
+                else:
+                    downloaded += 1
+                    logger.info(f"    {name} ({info})")
             else:
-                downloaded += 1
-                logger.info(f"    {name} ({info})")
-        else:
-            failed += 1
-            logger.warning(f"    FAILED: {name} - {info}")
+                failed += 1
+                logger.warning(f"    FAILED: {name} - {info}")
+    else:
+        tasks = []
+        for url in files:
+            filename = url.split("/")[-1].split("?")[0]
+            output_path = media_dir / filename
+            tasks.append((url, output_path))
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(download_file, session, url, path): (url, path)
+                for url, path in tasks
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"  TIMSS-{subject}/{country}", leave=False):
+                success, name, info = future.result()
+                if success:
+                    if info == "skipped":
+                        skipped += 1
+                    else:
+                        downloaded += 1
+                        logger.info(f"    {name} ({info})")
+                else:
+                    failed += 1
+                    logger.warning(f"    FAILED: {name} - {info}")
 
     logger.info(f"  [TIMSS-{subject}/{country}] {downloaded} new, {skipped} skipped, {failed} failed")
     return downloaded
@@ -274,6 +299,8 @@ def main():
                         help="Comma-separated: Math,Science (default: both)")
     parser.add_argument("--countries", type=str, default=None,
                         help="Comma-separated countries (default: all per subject)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel download threads (default: 1)")
 
     args = parser.parse_args()
     output_dir = Path(args.output_dir).resolve()
@@ -298,11 +325,12 @@ def main():
 
         logger.info(f"=== TIMSS-{subject} ===")
         logger.info(f"Countries: {', '.join(countries)}")
+        logger.info(f"Workers: {args.workers}")
 
         for country in countries:
             logger.info(f"--- TIMSS-{subject}/{country} ---")
             total_downloaded += download_country_media(
-                subject, country, output_dir, session
+                subject, country, output_dir, session, workers=args.workers
             )
             time.sleep(1)
 
