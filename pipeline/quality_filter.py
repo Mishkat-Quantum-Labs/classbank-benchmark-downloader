@@ -1,57 +1,66 @@
-"""
-Separate Warn Files
-====================
+"""Quality filtering — moves warn-status files to data-limitation-set.
 
-Moves files classified as "warn" by the preprocessor verification into
-the data-limitation-set/ directory. This keeps the main dataset/ clean
-with only fully-verified (pass) files.
-
-Moves transcripts (.cha), parsed JSON, and associated media files.
-
-Usage:
-    python separate_warn_files.py [--dataset-dir ./dataset]
+Separates files that failed verification (status="warn") from the main dataset
+into the data-limitation-set/ directory to keep dataset/ clean with only
+fully-verified (pass) files.
 """
 
 import json
+import logging
 import shutil
-import argparse
 from pathlib import Path
 
+from pipeline.config import DATASET_DIR, LIMITATION_SET_DIR
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Move warn-status files to data-limitation-set/"
-    )
-    parser.add_argument("--dataset-dir", type=str, default="./dataset",
-                        help="Dataset directory (default: ./dataset)")
-    args = parser.parse_args()
+logger = logging.getLogger(__name__)
 
-    dataset_dir = Path(args.dataset_dir).resolve()
+
+def separate_warn_files(dataset_dir: Path | None = None) -> dict[str, int]:
+    """Move warn-status files to data-limitation-set/.
+
+    Reads verification.json from the parsed output directory, identifies files
+    with status="warn", and moves their transcripts (.cha), parsed JSON, and
+    associated media files to the data-limitation-set directory.
+
+    Args:
+        dataset_dir: Dataset directory. Defaults to DATASET_DIR.
+
+    Returns:
+        Dict with counts: moved_transcripts, moved_parsed, moved_media.
+
+    Raises:
+        FileNotFoundError: If verification.json doesn't exist.
+    """
+    if dataset_dir is None:
+        dataset_dir = DATASET_DIR
+
     base_dir = dataset_dir.parent
-    limit_set = base_dir / "data-limitation-set" / "dataset"
+    limit_set = LIMITATION_SET_DIR
 
     # Read verification report
     verification_path = dataset_dir / "parsed" / "verification.json"
     if not verification_path.exists():
-        print("[ERROR] verification.json not found. Run preprocess_transcripts.py first.")
-        return 1
+        raise FileNotFoundError(
+            f"verification.json not found at {verification_path}. "
+            "Run preprocess_transcripts.py first."
+        )
 
     data = json.loads(verification_path.read_text(encoding="utf-8"))
     warn_files = [f for f in data["files"] if f["status"] == "warn"]
 
     if not warn_files:
-        print("[INFO] No warn files found. Dataset is clean.")
-        return 0
+        logger.info("No warn files found. Dataset is clean.")
+        return {"moved_transcripts": 0, "moved_parsed": 0, "moved_media": 0}
 
-    print(f"[INFO] Found {len(warn_files)} warn files to move")
+    logger.info(f"Found {len(warn_files)} warn files to move")
 
     moved_transcripts = 0
     moved_parsed = 0
     moved_media = 0
 
     for wf in warn_files:
-        source_rel = wf["source"]   # e.g. dataset/transcripts/APT/01-Character.cha
-        output_rel = wf["output"]   # e.g. dataset/parsed/APT/01-Character.json
+        source_rel = wf["source"]
+        output_rel = wf["output"]
         corpus = wf["corpus"]
 
         # 1. Move transcript .cha file
@@ -83,10 +92,13 @@ def main():
                     shutil.move(str(media_file), str(dst_media))
                     moved_media += 1
 
-    print(f"[DONE] Moved: {moved_transcripts} transcripts, {moved_parsed} parsed, {moved_media} media")
-    print(f"       Destination: {limit_set}")
-    return 0
+    logger.info(
+        f"Moved: {moved_transcripts} transcripts, {moved_parsed} parsed, {moved_media} media"
+    )
+    logger.info(f"Destination: {limit_set}")
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return {
+        "moved_transcripts": moved_transcripts,
+        "moved_parsed": moved_parsed,
+        "moved_media": moved_media,
+    }

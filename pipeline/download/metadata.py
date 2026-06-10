@@ -1,80 +1,29 @@
-"""
-TalkBank ClassBank - Metadata Downloader
-=========================================
+"""Download metadata from TalkBankDB API and generate dataset documentation."""
 
-Queries the TalkBankDB API for corpus metadata and generates:
-- corpus_manifest.json: Full dataset manifest with metadata
-- transcripts_index.csv: Index of all transcript files (if transcripts exist)
-- README.md: Dataset documentation
-
-Usage:
-    python download_metadata.py [--output-dir ./dataset] [--corpora APT,Bradford]
-"""
-
-import os
-import sys
 import json
-import time
-import argparse
 import logging
-from pathlib import Path
+import time
 from datetime import datetime
+from pathlib import Path
 
-import requests
 import pandas as pd
+import requests
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-TALKBANK_API_URL = "https://sla2.talkbank.org:1515"
-
-ENGLISH_CORPORA = [
-    "APT", "Bradford", "CarlaJim", "CogInst", "Crowley", "Curtis",
-    "DISPEL", "Frederiksen", "Graesser", "Horowitz", "JLS", "Looney",
-    "MacWhinney", "Moschkovich", "Person", "Rahm", "Roth", "Stevens",
-    "TIMSS-Math", "TIMSS-Science", "Warren",
-]
-
-CORPUS_DESCRIPTIONS = {
-    "APT": "Academically productive talk",
-    "Bradford": "School lessons on cultural literacy",
-    "CarlaJim": "Math lessons",
-    "CogInst": "Problem-based learning in medical school",
-    "Crowley": "Exploration of electricity in a science museum",
-    "Curtis": "Second-grade geometry lessons",
-    "DISPEL": "Tutorial game environment for dysrhythmic phonation",
-    "Frederiksen": "Statistics tutoring",
-    "Graesser": "Research methodology tutoring",
-    "Horowitz": "Lessons on camels",
-    "JLS": "Lessons on statistical graphing",
-    "Looney": "Classroom interactions",
-    "MacWhinney": "Lectures on Psychology Research Methods",
-    "Moschkovich": "Math word problem solving",
-    "Person": "Statistics tutoring",
-    "Rahm": "Museum lessons on the color of the sky",
-    "Roth": "Geography lesson",
-    "Stevens": "Architecture discussions",
-    "TIMSS-Math": "Math classroom recordings from multiple countries",
-    "TIMSS-Science": "Science classroom recordings from multiple countries",
-    "Warren": "Teachers' discussion of gravity",
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],
+from pipeline.config import (
+    CORPUS_DESCRIPTIONS,
+    DATASET_DIR,
+    ENGLISH_CORPORA,
+    TALKBANK_API_URL,
 )
+
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# TalkBankDB API
-# ---------------------------------------------------------------------------
+# ── TalkBankDB API ──────────────────────────────────────────────────────────
 
 
-def query_transcript_metadata(corpus):
+def query_transcript_metadata(corpus: str) -> dict:
     """Query TalkBankDB for transcript metadata."""
     url = f"{TALKBANK_API_URL}/getTranscriptSummary"
     query = {
@@ -98,7 +47,7 @@ def query_transcript_metadata(corpus):
         return {"colHeadings": [], "data": []}
 
 
-def collect_corpus_metadata(corpus):
+def collect_corpus_metadata(corpus: str) -> dict:
     """Collect metadata for a single corpus."""
     result = query_transcript_metadata(corpus)
 
@@ -113,8 +62,8 @@ def collect_corpus_metadata(corpus):
 
     if result.get("data"):
         headers = result.get("colHeadings", [])
-        media_types = set()
-        languages = set()
+        media_types: set[str] = set()
+        languages: set[str] = set()
 
         for row in result["data"]:
             entry = dict(zip(headers, row)) if headers else {}
@@ -132,12 +81,10 @@ def collect_corpus_metadata(corpus):
     return metadata
 
 
-# ---------------------------------------------------------------------------
-# Output Generation
-# ---------------------------------------------------------------------------
+# ── Output Generation ───────────────────────────────────────────────────────
 
 
-def generate_manifest(all_metadata, output_dir):
+def generate_manifest(all_metadata: list[dict], output_dir: Path) -> dict:
     """Generate dataset manifest JSON."""
     manifest = {
         "dataset_name": "TalkBank ClassBank English Classroom Recordings",
@@ -164,7 +111,7 @@ def generate_manifest(all_metadata, output_dir):
     return manifest
 
 
-def generate_transcripts_index(output_dir):
+def generate_transcripts_index(output_dir: Path) -> None:
     """Generate a CSV index of all downloaded transcript files."""
     transcript_dir = output_dir / "transcripts"
     if not transcript_dir.exists():
@@ -190,7 +137,7 @@ def generate_transcripts_index(output_dir):
         logger.info(f"Transcript index saved: {len(records)} files indexed")
 
 
-def generate_readme(manifest, output_dir):
+def generate_readme(manifest: dict, output_dir: Path) -> None:
     """Generate README for the dataset directory."""
     corpora_table = "\n".join(
         f"| {m['corpus']} | {m.get('description', '')} |"
@@ -220,18 +167,18 @@ excluded from this collection).
 
 ```
 dataset/
-├── metadata/
-│   ├── corpus_manifest.json      # Full dataset manifest with metadata
-│   └── transcripts_index.csv     # Index of all transcript files
-├── transcripts/
-│   ├── <corpus_name>/
-│   │   └── *.cha                 # CHAT format transcription files
-│   └── ...
-├── media/
-│   ├── <corpus_name>/
-│   │   └── *.mp4 / *.mp3        # Audio/video recordings
-│   └── ...
-└── README.md
+\u251c\u2500\u2500 metadata/
+\u2502   \u251c\u2500\u2500 corpus_manifest.json      # Full dataset manifest with metadata
+\u2502   \u2514\u2500\u2500 transcripts_index.csv     # Index of all transcript files
+\u251c\u2500\u2500 transcripts/
+\u2502   \u251c\u2500\u2500 <corpus_name>/
+\u2502   \u2502   \u2514\u2500\u2500 *.cha                 # CHAT format transcription files
+\u2502   \u2514\u2500\u2500 ...
+\u251c\u2500\u2500 media/
+\u2502   \u251c\u2500\u2500 <corpus_name>/
+\u2502   \u2502   \u2514\u2500\u2500 *.mp4 / *.mp3        # Audio/video recordings
+\u2502   \u2514\u2500\u2500 ...
+\u2514\u2500\u2500 README.md
 ```
 
 ## Corpora Included
@@ -285,34 +232,35 @@ See: https://creativecommons.org/licenses/by-nc-sa/3.0/
     logger.info(f"README saved: {readme_path}")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ── Main Entry Point ────────────────────────────────────────────────────────
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Download metadata from TalkBankDB API and generate dataset docs."
-    )
-    parser.add_argument("--output-dir", type=str, default="./dataset",
-                        help="Output directory (default: ./dataset)")
-    parser.add_argument("--corpora", type=str, default=None,
-                        help="Comma-separated corpora (default: all)")
-    parser.add_argument("--skip-api", action="store_true",
-                        help="Skip API queries, generate minimal metadata only")
+def download_all_metadata(
+    output_dir: Path | None = None,
+    corpora: list[str] | None = None,
+    skip_api: bool = False,
+) -> dict:
+    """Collect metadata and generate dataset documentation.
 
-    args = parser.parse_args()
-    output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    Args:
+        output_dir: Base dataset directory. Defaults to DATASET_DIR.
+        corpora: List of corpus names. Defaults to ENGLISH_CORPORA.
+        skip_api: If True, skip API queries and generate minimal metadata only.
 
-    corpora = [c.strip() for c in args.corpora.split(",")] if args.corpora else ENGLISH_CORPORA
+    Returns:
+        The manifest dict.
+    """
+    if output_dir is None:
+        output_dir = DATASET_DIR
+
+    if corpora is None:
+        corpora = ENGLISH_CORPORA
 
     logger.info(f"Output: {output_dir}")
     logger.info(f"Corpora: {len(corpora)}")
 
-    # Collect metadata
     all_metadata = []
-    if not args.skip_api:
+    if not skip_api:
         logger.info("Querying TalkBankDB API for metadata...")
         for corpus in tqdm(corpora, desc="Querying metadata"):
             meta = collect_corpus_metadata(corpus)
@@ -329,13 +277,9 @@ def main():
                 "languages": ["eng"],
             })
 
-    # Generate outputs
     manifest = generate_manifest(all_metadata, output_dir)
     generate_transcripts_index(output_dir)
     generate_readme(manifest, output_dir)
 
     logger.info("Metadata generation complete.")
-
-
-if __name__ == "__main__":
-    main()
+    return manifest

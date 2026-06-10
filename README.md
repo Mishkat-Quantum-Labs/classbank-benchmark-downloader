@@ -1,203 +1,118 @@
-# TalkBank ClassBank Benchmark Dataset
+# Origin ASR Benchmark
 
-Downloads English classroom recordings (audio/video) and CHAT transcriptions from [TalkBank's ClassBank](https://class.talkbank.org), converts them to standardized JSON, and organizes them for speech/NLP benchmarking.
-
-## Quick Start: Clone to Complete Dataset
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/Mishkat-Quantum-Labs/classbank-benchmark-downloader.git
-cd classbank-benchmark-downloader
-
-# 2. Create and activate a virtual environment
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-# source venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set up credentials (register free at https://class.talkbank.org first)
-cp .env.example .env
-# Edit .env with your TalkBank email and password
-
-# 5. Download transcripts (all corpora)
-python download_transcripts.py
-python download_timss_transcripts.py
-
-# 6. Download media (audio/video) — this takes a while (~10 GB total)
-python download_media.py --workers 4
-python download_timss_media.py --workers 4
-
-# 7. Run the preprocessor (converts .cha → JSON, runs verification)
-python preprocess_transcripts.py
-
-# 8. Separate warn files into data-limitation-set
-python separate_warn_files.py
-
-# 9. Run tests to confirm everything is good
-python -m pytest tests/ -v
-```
-
-After this, you'll have:
-- `dataset/` — 303 fully verified files (transcripts + JSON + media), all passing 6 quality checks
-- `data-limitation-set/` — 41 files with incomplete timestamps (valid JSON, but separated for reliability)
-
-> **Note:** Steps 5-6 download ~10 GB of media. Use `--corpora APT,Bradford` to download a subset for testing.
-
-## Prerequisites
-
-1. **Python 3.8+**
-2. **Free TalkBank account** — Register at https://class.talkbank.org (click Login > New User)
+Downloads English classroom recordings and CHAT transcriptions from [TalkBank ClassBank](https://class.talkbank.org), converts them to standardized JSON, and benchmarks STT engines against the ground truth.
 
 ## Setup
 
 ```bash
+git clone https://github.com/Mishkat-Quantum-Labs/classbank-benchmark-downloader.git
+cd classbank-benchmark-downloader
+
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+
 pip install -r requirements.txt
 ```
 
-## Authentication
+## Credentials
 
-All download scripts require a free TalkBank account. Credentials are loaded from a `.env` file in the project root.
-
-### Create your `.env` file
+Register a free account at https://class.talkbank.org, then:
 
 ```bash
 cp .env.example .env
 ```
 
-Then edit `.env` with your credentials:
+Fill in at minimum:
 
 ```env
+# Required for downloading data
 TALKBANK_EMAIL=your@email.com
 TALKBANK_PASSWORD=yourpassword
+
+# Required for benchmarking
+GEMINI_API_KEY=your-gemini-api-key
+ELEVENLABS_API_KEY=your-elevenlabs-api-key
+AWS_ACCESS_KEY_ID=your-aws-access-key
+AWS_SECRET_ACCESS_KEY=your-aws-secret-key
 ```
 
-> **Note:** The `.env` file is gitignored and will never be committed. Do not share it.
+## End-to-End Pipeline
 
-## Pipeline Overview
-
-```
-1. Download transcripts (.cha)     → dataset/transcripts/
-2. Download media (audio/video)    → dataset/media/
-3. Preprocess (CHA → JSON)        → dataset/parsed/
-4. Verification & separation       → warn files → data-limitation-set/
-```
-
-## Scripts
-
-| Script | Purpose | Auth Required |
-|--------|---------|---------------|
-| `download_metadata.py` | Queries TalkBankDB API, generates manifest and index | No |
-| `download_transcripts.py` | Downloads CHAT-format transcript archives | Yes |
-| `download_media.py` | Downloads audio/video recordings | Yes |
-| `download_timss_transcripts.py` | Downloads TIMSS transcript archives (per-country) | Yes |
-| `download_timss_media.py` | Downloads TIMSS video recordings (per-country) | Yes |
-| `preprocess_transcripts.py` | Converts .cha → JSON with 6-check verification | No |
-| `separate_warn_files.py` | Moves warn files to data-limitation-set/ | No |
-
-## Usage
-
-### Full pipeline
+Run these in order:
 
 ```bash
-# Step 1: Metadata (no auth needed)
-python download_metadata.py
+# 1. Download transcripts (.cha files)
+python run_download_transcripts.py
+python run_download_timss.py
 
-# Step 2: Transcripts
-python download_transcripts.py
+# 2. Download media (audio/video, ~10 GB)
+python run_download_media.py
 
-# Step 3: Media
-python download_media.py
-
-# Step 4: TIMSS transcripts (USA only)
-python download_timss_transcripts.py
-
-# Step 5: TIMSS media (USA only)
-python download_timss_media.py
-
-# Step 6: Convert to JSON and verify
+# 3. Convert .cha → JSON with verification
 python preprocess_transcripts.py
+
+# 4. Separate warn-status files
+python run_quality_filter.py
+
+# 5. Download metadata & generate docs
+python run_download_metadata.py
+
+# 6. Run benchmark against STT engines
+python run_benchmark.py
 ```
 
-### Download specific corpora only
+After this you'll have:
+- `dataset/` — 303 verified files (transcripts + JSON + media)
+- `data-limitation-set/` — 41 files with incomplete timestamps (valid but separated)
+- `benchmark_results/` — STT engine evaluation reports
 
-Each script accepts `--corpora` to target specific collections:
-
-```bash
-python download_transcripts.py --corpora Bradford,APT
-python download_media.py --corpora Crowley,Roth,Warren
-python download_metadata.py --corpora Bradford,Stevens,Curtis
-```
-
-### TIMSS data (separate scripts)
-
-```bash
-python download_timss_transcripts.py
-python download_timss_media.py
-python download_timss_media.py --subjects Math --countries USA,Australia
-```
-
-### Custom output directory
-
-```bash
-python download_transcripts.py --output-dir /path/to/my/data
-python download_media.py --output-dir /path/to/my/data
-```
-
-### Parallel downloads
-
-```bash
-python download_media.py --workers 4
-python download_timss_media.py --workers 4
-```
-
-## Smart Skip Logic
-
-The download scripts automatically skip files that:
-- Already exist in `dataset/media/` (size > 100 bytes)
-- Were moved to `data-limitation-set/` (files with quality issues)
-
-This prevents re-downloading files that were intentionally separated. Partially downloaded `.tmp` files will resume from where they left off.
-
-## Dataset Structure
+## Project Structure
 
 ```
-benchmark_data_p/
-├── dataset/                      # Clean, verified data (303 files, all pass)
-│   ├── transcripts/              # Source .cha files
-│   │   ├── APT/                  # 32 files
-│   │   ├── Bradford/             # 7 files
-│   │   ├── Curtis/               # Multi-day recordings
-│   │   ├── TIMSS-Math/           # 22 files
-│   │   └── ... (38 corpora)
-│   ├── parsed/                   # Converted JSON output
-│   │   ├── {Corpus}/{file}.json  # Per-file JSON
-│   │   ├── manifest.json         # Index of all converted files
-│   │   └── verification.json     # Per-file quality report
-│   └── media/                    # Audio/video recordings
-│       ├── APT/                  # *.mp4
-│       ├── Bradford/             # *.mp3
-│       └── ...
-├── data-limitation-set/          # Files with source data limitations (41 files)
-│   └── dataset/
-│       ├── transcripts/          # .cha files with timestamp issues
-│       ├── parsed/               # Their JSON (valid, but incomplete timestamps)
-│       └── media/                # Associated media (30 files)
-├── download_media.py
-├── download_timss_media.py
-├── download_transcripts.py
-├── download_timss_transcripts.py
-├── download_metadata.py
-├── preprocess_transcripts.py
-└── tests/
+├── pipeline/                     # Data acquisition & quality package
+│   ├── config.py                 # Paths, URLs, corpora, credentials
+│   ├── auth.py                   # TalkBank authentication
+│   ├── quality_filter.py         # Separates warn files
+│   └── download/
+│       ├── media.py              # Non-TIMSS media download
+│       ├── transcripts.py        # Non-TIMSS transcript download
+│       ├── timss_media.py        # TIMSS media download
+│       ├── timss_transcripts.py  # TIMSS transcript download
+│       ├── metadata.py           # TalkBankDB API + docs generation
+│       └── helpers.py            # Shared download/scraping utilities
+│
+├── benchmark/                    # ASR benchmarking package
+│   ├── config.py                 # Engine settings, API keys
+│   ├── engines/                  # STT engine implementations
+│   │   ├── gemini_engine.py
+│   │   └── elevenlabs_engine.py
+│   ├── evaluation.py             # WER/CER metrics
+│   ├── llm_client.py             # LLM for speaker classification
+│   └── prompts.py                # Prompt templates
+│
+├── preprocess_transcripts.py     # CHA→JSON conversion + verification
+│
+├── run_download_media.py         # Entry: download media
+├── run_download_transcripts.py   # Entry: download transcripts
+├── run_download_timss.py         # Entry: download TIMSS data
+├── run_download_metadata.py      # Entry: metadata & docs
+├── run_quality_filter.py         # Entry: separate warn files
+├── run_benchmark.py              # Entry: run STT benchmark
+│
+├── dataset/                      # Clean verified data
+│   ├── transcripts/{Corpus}/     # Source .cha files
+│   ├── parsed/{Corpus}/          # Converted JSON
+│   └── media/{Corpus}/           # Audio/video
+│
+├── data-limitation-set/          # Files with source data limitations
+├── benchmark_results/            # STT evaluation outputs
+└── tests/                        # pytest suite
 ```
 
 ## Output JSON Schema
 
-Each converted file in `dataset/parsed/` follows this structure:
+Each file in `dataset/parsed/` follows:
 
 ```json
 {
@@ -222,31 +137,22 @@ Each converted file in `dataset/parsed/` follows this structure:
 }
 ```
 
-## Verification (6 Quality Checks)
+## Verification Checks
 
-Every converted file is verified against its source:
+Every converted file passes 6 quality checks:
 
-| Check | Pass Criteria |
-|-------|---------------|
-| Utterance count | Source vs output: exact match |
-| Speaker mapping | All source speakers present |
-| Timestamp coverage | > 90% of segments have start+end |
-| Word count | ≤ 10% difference |
-| Timestamp validity | No negative times, end ≥ start |
-| Timestamp order | Non-decreasing start times |
+| Check | Pass | Warn | Fail |
+|-------|------|------|------|
+| Utterance count diff | 0 | 1–2 | ≥3 |
+| Speaker mapping | All present | Missing roles | — |
+| Timestamp coverage | >90% | ≤90% | — |
+| Word count diff | ≤10% | 10–25% | >25% |
+| Timestamp validity | All valid | — | Any violation |
+| Timestamp order | Monotonic | — | Not monotonic |
 
-Files that **pass** all checks stay in `dataset/`. Files with **warnings** (typically low timestamp coverage due to source data) are moved to `data-limitation-set/`.
+Files with **pass** stay in `dataset/`. Files with **warn** go to `data-limitation-set/`.
 
-## Data Limitation Set
-
-The 41 files in `data-limitation-set/` were successfully converted but have incomplete timestamps in the **source .cha files** (not a pipeline bug). They include:
-
-- **11 files with 0% timestamp coverage** — text-only transcripts (Curtis/overview, Person/b04)
-- **30 files with 62-90% coverage** — partially timed by original annotators (APT, TIMSS-Science, Stevens, etc.)
-
-The JSON output is correct — utterances without timestamps have `null` for start/end. They're separated because time-aligned downstream tools won't work reliably with them.
-
-## Available Corpora
+## Corpora
 
 | Corpus | Description |
 |--------|-------------|
@@ -268,29 +174,15 @@ The JSON output is correct — utterances without timestamps have `null` for sta
 | Rahm | Museum lessons on the color of the sky |
 | Roth | Geography lesson |
 | Stevens | Architecture discussions |
-| TIMSS-Math | Math classroom recordings from multiple countries |
-| TIMSS-Science | Science classroom recordings from multiple countries |
+| TIMSS-Math | Math classroom recordings (USA) |
+| TIMSS-Science | Science classroom recordings (USA) |
 | Warren | Teachers' discussion of gravity |
-
-## Benchmarking Use Cases
-
-- **ASR**: Time-aligned utterances with media as ground truth
-- **Speaker Diarization**: Multiple speakers per recording with IDs
-- **Classroom Discourse Analysis**: Speaker role annotations (Teacher, Student, etc.)
-- **Turn-taking Detection**: Timestamps for overlap and gap analysis
-- **Educational NLP**: Topic modeling, QA, summarization
 
 ## License & Citation
 
-Data is shared under [CC BY-NC-SA 3.0](https://creativecommons.org/licenses/by-nc-sa/3.0/).
+Data shared under [CC BY-NC-SA 3.0](https://creativecommons.org/licenses/by-nc-sa/3.0/).
 
 ```
 MacWhinney, B. (2000). The CHILDES Project: Tools for Analyzing Talk (3rd ed.).
 Mahwah, NJ: Lawrence Erlbaum Associates.
 ```
-
-## Source
-
-- TalkBank: https://talkbank.org
-- ClassBank: https://class.talkbank.org
-- TBDBpy API: https://github.com/TalkBank/TBDBpy

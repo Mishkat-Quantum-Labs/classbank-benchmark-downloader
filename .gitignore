@@ -2,6 +2,9 @@
 dataset/
 data-limitation-set/
 
+# Benchmark results (large, regenerated)
+benchmark_results/
+
 # Python
 __pycache__/
 *.py[cod]
