@@ -37,11 +37,12 @@ from benchmark.config import (
     PARSED_DIR,
     RESULTS_DIR,
 )
-from benchmark.evaluation import (
-    FileMetrics,
+from benchmark.evaluation import FileMetrics, compute_file_metrics
+from benchmark.semantic_wer import compute_semantic_wer
+from benchmark.diarization import compute_diarization_error_rate
+from benchmark.statistics import (
     bootstrap_ci,
     compute_engine_report,
-    compute_file_metrics,
     pairwise_comparison,
     report_to_dict,
 )
@@ -266,6 +267,15 @@ def run_evaluation(
         )
 
         if metrics:
+            # Compute Semantic WER (uses Claude Sonnet 4.5 if API key set)
+            metrics.semantic_wer = compute_semantic_wer(ref_text, hyp_text)
+
+            # Compute DER if both have segments
+            ref_segments = ground_truth.get("segments", [])
+            hyp_segments = hypothesis.get("segments", [])
+            if ref_segments and hyp_segments:
+                metrics.der = compute_diarization_error_rate(ref_segments, hyp_segments)
+
             file_metrics.append(metrics)
 
     # Compute aggregate report

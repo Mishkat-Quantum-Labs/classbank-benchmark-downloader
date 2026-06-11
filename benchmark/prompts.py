@@ -1,7 +1,4 @@
-"""Prompts for STT engines — transcription and speaker classification.
-
-Copied from Origin-Tech's prompt_service.py for benchmark reproducibility.
-"""
+"""Prompts for STT engines — transcription, speaker classification, and evaluation."""
 
 # ── Gemini Transcription Prompt ─────────────────────────────────────────────
 
@@ -99,3 +96,59 @@ def build_speaker_classification_prompt(transcript: str, speaker_count: int) -> 
         speaker_count=speaker_count,
         transcript=transcript,
     )
+
+
+# ── Semantic WER Prompt (LLM-as-judge) ──────────────────────────────────────
+# Adapted from Pipecat's open-source STT benchmark (MIT license)
+# https://github.com/pipecat-ai/stt-benchmark
+
+SEMANTIC_WER_PROMPT = """You are an expert ASR evaluator. Calculate the Semantic Word Error Rate (WER) - counting ONLY transcription errors that would impact meaning.
+
+## Rules
+
+Count as ERROR:
+- Word substitutions that change meaning ("card" → "car", "trace" → "trade")
+- Nonsense/hallucinated words ("lentil" → "landon")
+- Missing words that change intent
+- Wrong names, numbers, negations
+
+Do NOT count as error:
+- Punctuation, capitalization differences
+- Contractions ("don't" = "do not")
+- Singular/plural when meaning is preserved ("license" = "licenses")
+- Number format ("3" = "three", "$5" = "five dollars")
+- Filler words (um, uh, like)
+- Missing articles ("the", "a") that don't change meaning
+- British/American spelling ("colour" = "color")
+- Hyphenation ("long-term" = "long term")
+- Spoken variations ("gonna" = "going to", "yeah" = "yes")
+- Possessives ("driver's" = "drivers" = "driver")
+
+## Process
+
+1. Normalize both texts (lowercase, expand contractions, remove fillers)
+2. Align word-by-word
+3. For each difference, ask: "Would an LLM interpret these differently?"
+4. Count ONLY differences where the answer is YES
+
+## Output
+
+Reply with ONLY a JSON object:
+{{"substitutions": S, "deletions": D, "insertions": I, "reference_words": N}}
+
+Where:
+- S = words that changed meaning
+- D = words lost that change meaning
+- I = extra words that add wrong meaning
+- N = total words in normalized reference
+
+REFERENCE:
+{reference}
+
+HYPOTHESIS:
+{hypothesis}"""
+
+
+def build_semantic_wer_prompt(reference: str, hypothesis: str) -> str:
+    """Build the LLM prompt for semantic WER evaluation."""
+    return SEMANTIC_WER_PROMPT.format(reference=reference, hypothesis=hypothesis)
