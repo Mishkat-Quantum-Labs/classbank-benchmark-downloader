@@ -1,10 +1,13 @@
-"""LLM client — initializes chat models for speaker classification.
+"""LLM client — unified model factory using LangChain init_chat_model.
 
-Uses AWS Bedrock with Claude Haiku for cost-effective speaker role classification
-in the ElevenLabs pipeline.
+Single entry point for all LLM models across the benchmark pipeline.
+Uses init_chat_model with provider-specific packages:
+  - langchain-aws (ChatBedrockConverse) for AWS Bedrock models
+  - langchain-google-genai (ChatGoogleGenerativeAI) for Google Gemini models
 """
 
 import logging
+from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -16,6 +19,11 @@ from benchmark.config import (
     AWS_SECRET_ACCESS_KEY,
     BEDROCK_REGION,
     ELEVENLABS_ROLE_CLASSIFICATION_RETRIES,
+    GEMINI_API_KEY,
+    GEMINI_MODEL_MAP,
+    GEMINI_STT_MAX_OUTPUT_TOKENS,
+    GEMINI_STT_TEMPERATURE,
+    GEMINI_STT_TOP_P,
 )
 
 logger = logging.getLogger("benchmark")
@@ -27,25 +35,6 @@ BEDROCK_CONFIG = BotoConfig(
     connect_timeout=10,
     retries={"max_attempts": 5, "mode": "adaptive"},
 )
-
-# ── Model definitions ───────────────────────────────────────────────────────
-
-TEXT_MODELS = {
-    "claude_haiku": {
-        "name": "Claude Haiku 4.5",
-        "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "provider": "anthropic",
-        "max_tokens": 256,
-        "temperature": 0.0,
-    },
-    "claude_sonnet": {
-        "name": "Claude Sonnet 4.5",
-        "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        "provider": "anthropic",
-        "max_tokens": 4096,
-        "temperature": 0.7,
-    },
-}
 
 
 def _get_bedrock_client():
@@ -59,24 +48,102 @@ def _get_bedrock_client():
     )
 
 
+# ── Model registry ─────────────────────────────────────────────────────────
+
+MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+    # AWS Bedrock models
+    "claude_haiku": {
+        "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "model_provider": "bedrock_converse",
+        "temperature": 0.0,
+        "max_tokens": 256,
+    },
+    "claude_sonnet": {
+        "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "model_provider": "bedrock_converse",
+        "temperature": 0.0,
+        "max_tokens": 4096,
+    },
+    # Google Gemini models
+    "gemini_pro": {
+        "model": GEMINI_MODEL_MAP.get("gemini_pro", "gemini-2.5-pro"),
+        "model_provider": "google_genai",
+        "temperature": GEMINI_STT_TEMPERATURE,
+        "max_output_tokens": GEMINI_STT_MAX_OUTPUT_TOKENS,
+    },
+    "gemini_31_pro": {
+        "model": GEMINI_MODEL_MAP.get("gemini_31_pro", "gemini-3.1-pro-preview"),
+        "model_provider": "google_genai",
+        "temperature": GEMINI_STT_TEMPERATURE,
+        "max_output_tokens": GEMINI_STT_MAX_OUTPUT_TOKENS,
+    },
+    "gemini_35_flash": {
+        "model": GEMINI_MODEL_MAP.get("gemini_35_flash", "gemini-3.5-flash"),
+        "model_provider": "google_genai",
+        "temperature": GEMINI_STT_TEMPERATURE,
+        "max_output_tokens": GEMINI_STT_MAX_OUTPUT_TOKENS,
+    },
+}
+
+
+# ── Unified model factory ──────────────────────────────────────────────────
+
+
 def get_chat_model(model_key: str = "claude_haiku"):
-    """Initialize and return a LangChain chat model for the given model key.
+    """Initialize and return a LangChain chat model via init_chat_model.
+
+    This is the single entry point for all LLM usage in the benchmark.
+    Routes to the correct provider (bedrock_converse or google_genai)
+    based on the model registry.
 
     Args:
-        model_key: Key into TEXT_MODELS dict. Default "claude_haiku".
+        model_key: Key into MODEL_REGISTRY. Options:
+            - "claude_haiku" (Bedrock, speaker classification)
+            - "claude_sonnet" (Bedrock, semantic WER evaluation)
+            - "gemini_pro" (Google, transcription)
+            - "gemini_31_pro" (Google, transcription)
+            - "gemini_35_flash" (Google, transcription)
 
     Returns:
-        A LangChain chat model instance configured for Bedrock.
+        A LangChain BaseChatModel instance.
+
+    Raises:
+        ValueError: If model_key is not in the registry.
     """
-    model_config = TEXT_MODELS[model_key]
-    return init_chat_model(
-        model_config["model_id"],
-        model_provider="bedrock",
-        region_name=BEDROCK_REGION,
-        temperature=model_config["temperature"],
-        max_tokens=model_config["max_tokens"],
-        client=_get_bedrock_client(),
-    )
+    if model_key not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model key '{model_key}'. "
+            f"Available: {list(MODEL_REGISTRY.keys())}"
+        )
+
+    config = MODEL_REGISTRY[model_key]
+    provider = config["model_provider"]
+
+    if provider == "bedrock_converse":
+        return init_chat_model(
+            model=config["model"],
+            model_provider="bedrock_converse",
+            region_name=BEDROCK_REGION,
+            temperature=config["temperature"],
+            max_tokens=config["max_tokens"],
+            client=_get_bedrock_client(),
+        )
+
+    elif provider == "google_genai":
+        return init_chat_model(
+            model=config["model"],
+            model_provider="google_genai",
+            api_key=GEMINI_API_KEY,
+            temperature=config["temperature"],
+            max_output_tokens=config["max_output_tokens"],
+            top_p=GEMINI_STT_TOP_P,
+        )
+
+    else:
+        raise ValueError(f"Unsupported provider '{provider}' for model '{model_key}'")
+
+
+# ── Speaker classification (ElevenLabs pipeline) ───────────────────────────
 
 
 def classify_speakers(transcript: str, speaker_count: int) -> dict[str, str]:

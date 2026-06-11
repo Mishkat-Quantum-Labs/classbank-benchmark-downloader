@@ -64,3 +64,14 @@ DATASET_DIR: Path = PROJECT_ROOT / "dataset"
 MEDIA_DIR: Path = DATASET_DIR / "media"
 PARSED_DIR: Path = DATASET_DIR / "parsed"
 RESULTS_DIR: Path = PROJECT_ROOT / "benchmark_results"
+
+# ── Semantic WER Settings (Pipecat approach) ────────────────────────────────
+
+SEMANTIC_WER_MODEL: str = os.getenv(
+    "SEMANTIC_WER_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+)
+SEMANTIC_WER_MAX_TOKENS: int = int(os.getenv("SEMANTIC_WER_MAX_TOKENS", "4096"))
+SEMANTIC_WER_TEMPERATURE: float = float(os.getenv("SEMANTIC_WER_TEMPERATURE", "0.0"))
+SEMANTIC_WER_MAX_TURNS: int = int(os.getenv("SEMANTIC_WER_MAX_TURNS", "10"))
+SEMANTIC_WER_MAX_RETRIES: int = int(os.getenv("SEMANTIC_WER_MAX_RETRIES", "5"))
+SEMANTIC_WER_RETRY_BASE_WAIT: int = int(os.getenv("SEMANTIC_WER_RETRY_BASE_WAIT", "15"))

@@ -1,7 +1,8 @@
 """Gemini STT Engine — supports 2.5 Pro, 3.1 Pro, and 3.5 Flash.
 
 Adapted from Origin-Tech's stt_service.py for standalone benchmarking.
-Uses structured JSON output with voice diarization and speaker role classification.
+Uses the unified get_chat_model() factory from llm_client (langchain init_chat_model)
+for the LLM call, and google-genai SDK for audio file upload/polling.
 """
 
 import logging
@@ -15,14 +16,12 @@ from benchmark.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL_MAP,
     GEMINI_STT_HTTP_TIMEOUT,
-    GEMINI_STT_MAX_OUTPUT_TOKENS,
     GEMINI_STT_POLL_INTERVAL,
     GEMINI_STT_POLL_TIMEOUT,
-    GEMINI_STT_TEMPERATURE,
-    GEMINI_STT_TOP_P,
     GEMINI_STT_UPLOAD_RETRIES,
     GEMINI_STT_UPLOAD_RETRY_DELAY,
 )
+from benchmark.llm_client import get_chat_model
 from benchmark.prompts import build_transcription_prompt
 
 logger = logging.getLogger("benchmark")
@@ -143,7 +142,7 @@ RESPONSE_SCHEMA = {
 
 
 class GeminiEngine:
-    """Transcription engine using Google Gemini models."""
+    """Transcription engine using Google Gemini models via unified LLM factory."""
 
     def __init__(self, engine_key: str = "gemini_pro"):
         """Initialize with a specific Gemini model variant.
@@ -160,7 +159,10 @@ class GeminiEngine:
         self.model_id = GEMINI_MODEL_MAP[engine_key]
 
     def transcribe(self, audio_path: str) -> dict:
-        """Transcribe an audio file using Gemini.
+        """Transcribe an audio file using Gemini via LangChain init_chat_model.
+
+        Uses google-genai SDK for file upload/polling (required for large audio),
+        then the unified get_chat_model() factory for the LLM call.
 
         Args:
             audio_path: Local path to the audio file (MP3, MP4, WAV, etc.).
@@ -170,10 +172,7 @@ class GeminiEngine:
             word_count, stt_time, segments
         """
         from google import genai
-        from google.genai.types import (
-            AutomaticFunctionCallingConfig,
-            GenerateContentConfig,
-        )
+        from langchain_core.messages import HumanMessage
 
         t0 = time.time()
 
@@ -192,50 +191,55 @@ class GeminiEngine:
         }
         mime_type = mime_map.get(ext, "audio/mp4")
 
-        # Initialize Gemini client
+        # Initialize google-genai client for file upload only
         http_opts = {"timeout": GEMINI_STT_HTTP_TIMEOUT}
-        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts)
+        genai_client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts)
 
-        # Upload audio file
-        audio_file = self._upload_file(client, audio_path, mime_type)
+        # Upload audio file via google-genai (LangChain doesn't handle file upload)
+        audio_file = self._upload_file(genai_client, audio_path, mime_type)
 
         # Poll until file is ready
-        audio_file = self._wait_for_processing(client, audio_file)
+        audio_file = self._wait_for_processing(genai_client, audio_file)
 
-        # Generate transcription
+        # Get LLM via unified factory
+        llm = get_chat_model(self.engine_key)
+
+        # Build multimodal message with file URI + transcription prompt
         prompt = build_transcription_prompt()
-        config = GenerateContentConfig(
-            temperature=GEMINI_STT_TEMPERATURE,
-            top_p=GEMINI_STT_TOP_P,
-            max_output_tokens=GEMINI_STT_MAX_OUTPUT_TOKENS,
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "media",
+                    "mime_type": mime_type,
+                    "file_uri": audio_file.uri,
+                },
+                {"type": "text", "text": prompt},
+            ]
+        )
+
+        logger.info("[Gemini] Calling get_chat_model('%s') via init_chat_model…", self.engine_key)
+        response = llm.invoke(
+            [message],
             response_mime_type="application/json",
             response_schema=RESPONSE_SCHEMA,
-            automatic_function_calling=AutomaticFunctionCallingConfig(disable=True),
         )
-
-        logger.info("[Gemini] Calling generate_content with model=%s…", self.model_id)
-        response = client.models.generate_content(
-            model=self.model_id,
-            contents=[audio_file, prompt],
-            config=config,
-        )
-        logger.info("[Gemini] generate_content returned successfully (model=%s)", self.model_id)
+        logger.info("[Gemini] LLM invoke returned successfully (engine=%s)", self.engine_key)
 
         stt_time = time.time() - t0
 
         # Parse response
-        raw_text = response.text or ""
+        raw_text = response.content or ""
         parsed = repair_json(raw_text, return_objects=True)
 
         if not isinstance(parsed, dict):
             # Retry once
             logger.warning("[Gemini] Invalid JSON response, retrying…")
-            response = client.models.generate_content(
-                model=self.model_id,
-                contents=[audio_file, prompt],
-                config=config,
+            response = llm.invoke(
+                [message],
+                response_mime_type="application/json",
+                response_schema=RESPONSE_SCHEMA,
             )
-            raw_text = response.text or ""
+            raw_text = response.content or ""
             parsed = repair_json(raw_text, return_objects=True)
             if not isinstance(parsed, dict):
                 raise RuntimeError(
@@ -278,7 +282,7 @@ class GeminiEngine:
 
         # Cleanup uploaded file
         try:
-            client.files.delete(name=audio_file.name)
+            genai_client.files.delete(name=audio_file.name)
         except Exception:
             pass
 
