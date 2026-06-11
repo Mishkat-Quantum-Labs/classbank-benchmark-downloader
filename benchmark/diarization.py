@@ -38,7 +38,7 @@ def compute_diarization_error_rate(
     if not reference_segments or not hypothesis_segments:
         return None
 
-    # Validate required fields
+    # Validate required fields and values
     for seg in reference_segments:
         if not all(k in seg for k in ("start", "end", "speaker")):
             return None
@@ -46,19 +46,25 @@ def compute_diarization_error_rate(
         if not all(k in seg for k in ("start", "end", "speaker")):
             return None
 
-    # Build pyannote Annotations
+    # Build pyannote Annotations, skipping segments with invalid timestamps
     reference = Annotation()
     for seg in reference_segments:
-        start = float(seg["start"])
-        end = float(seg["end"])
-        if end > start:
+        try:
+            start = float(seg["start"])
+            end = float(seg["end"])
+        except (TypeError, ValueError):
+            continue
+        if seg["speaker"] and end > start:
             reference[Segment(start, end)] = seg["speaker"]
 
     hypothesis = Annotation()
     for seg in hypothesis_segments:
-        start = float(seg["start"])
-        end = float(seg["end"])
-        if end > start:
+        try:
+            start = float(seg["start"])
+            end = float(seg["end"])
+        except (TypeError, ValueError):
+            continue
+        if seg["speaker"] and end > start:
             hypothesis[Segment(start, end)] = seg["speaker"]
 
     if not reference or not hypothesis:

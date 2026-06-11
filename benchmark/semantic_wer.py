@@ -263,11 +263,12 @@ def evaluate_semantic_wer(
     num_turns = 0
 
     # Base request config — with prompt caching
-    # Bedrock caches system + tools when cachePoint is placed after them.
-    # Order: tools → system → messages (stable before variable content)
+    # Bedrock processes blocks in order: tools → system → messages.
+    # TTLs must be non-increasing in processing order, so tools cachePoint
+    # must have TTL >= system cachePoint TTL.
     system_prompt = [
         {"text": SEMANTIC_WER_SYSTEM_PROMPT},
-        {"cachePoint": {"type": "default", "ttl": "1h"}},
+        {"cachePoint": {"type": "default"}},
     ]
     tool_config = {
         "tools": [
@@ -280,7 +281,7 @@ def evaluate_semantic_wer(
     while num_turns < SEMANTIC_WER_MAX_TURNS:
         num_turns += 1
 
-        response = _converse_with_retry(client, {
+        request_payload = {
             "modelId": SEMANTIC_WER_MODEL,
             "system": system_prompt,
             "messages": messages,
@@ -289,7 +290,17 @@ def evaluate_semantic_wer(
                 "maxTokens": SEMANTIC_WER_MAX_TOKENS,
                 "temperature": SEMANTIC_WER_TEMPERATURE,
             },
-        })
+        }
+
+        # Disable extended thinking for Claude Sonnet 4.5 — it causes
+        # tool_use/tool_result protocol issues with the Converse API
+        # and is unnecessary for WER evaluation.
+        if "sonnet-4" in SEMANTIC_WER_MODEL or "claude-sonnet" in SEMANTIC_WER_MODEL:
+            request_payload["additionalModelRequestFields"] = {
+                "thinking": {"type": "disabled"}
+            }
+
+        response = _converse_with_retry(client, request_payload)
 
         # Extract assistant response
         assistant_message = response["output"]["message"]
@@ -311,7 +322,9 @@ def evaluate_semantic_wer(
             break
 
         if stop_reason == "tool_use":
-            # Process tool calls
+            # Process tool calls — MUST provide a tool_result for EVERY
+            # toolUse block, otherwise the Converse API raises a
+            # ValidationException about missing tool_result blocks.
             tool_results = []
             for block in assistant_message["content"]:
                 if "toolUse" in block:
@@ -336,6 +349,18 @@ def evaluate_semantic_wer(
                                 "content": [{"json": result}],
                             }
                         })
+                    else:
+                        # Unknown tool — still must return a tool_result to
+                        # satisfy the Converse API protocol requirement.
+                        tool_results.append({
+                            "toolResult": {
+                                "toolUseId": tool_use["toolUseId"],
+                                "content": [{"json": {
+                                    "error": f"Unknown tool '{tool_use['name']}'"
+                                }}],
+                                "status": "error",
+                            }
+                        })
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
@@ -347,7 +372,7 @@ def evaluate_semantic_wer(
             # If we got a result, get final response then break
             if result is not None:
                 try:
-                    final_response = _converse_with_retry(client, {
+                    final_payload = {
                         "modelId": SEMANTIC_WER_MODEL,
                         "system": system_prompt,
                         "messages": messages,
@@ -356,7 +381,12 @@ def evaluate_semantic_wer(
                             "maxTokens": 1024,
                             "temperature": SEMANTIC_WER_TEMPERATURE,
                         },
-                    })
+                    }
+                    if "sonnet-4" in SEMANTIC_WER_MODEL or "claude-sonnet" in SEMANTIC_WER_MODEL:
+                        final_payload["additionalModelRequestFields"] = {
+                            "thinking": {"type": "disabled"}
+                        }
+                    final_response = _converse_with_retry(client, final_payload)
                     final_message = final_response["output"]["message"]
                     reasoning_trace.append({
                         "role": "assistant",
@@ -413,9 +443,25 @@ def compute_semantic_wer(
     if not reference_text or not hypothesis_text:
         return None
 
-    try:
-        result = evaluate_semantic_wer(reference_text, hypothesis_text)
-        return round(result.wer, 4)
-    except Exception as e:
-        logger.error("[SemWER] Evaluation failed: %s", e)
-        return None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = evaluate_semantic_wer(reference_text, hypothesis_text)
+            return round(result.wer, 4)
+        except Exception as e:
+            error_msg = str(e)
+            # Retry on ValidationException (message ordering issues) and
+            # RuntimeError (model didn't call tool within max turns)
+            is_retryable = (
+                "ValidationException" in error_msg
+                or "did not call calculate_wer" in error_msg
+            )
+            if is_retryable and attempt < max_attempts:
+                logger.warning(
+                    "[SemWER] Attempt %d/%d failed: %s — retrying...",
+                    attempt, max_attempts, error_msg,
+                )
+                time.sleep(2 * attempt)
+                continue
+            logger.error("[SemWER] Evaluation failed: %s", e)
+            return None

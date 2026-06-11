@@ -20,6 +20,7 @@ from benchmark.config import (
     GEMINI_STT_POLL_TIMEOUT,
     GEMINI_STT_UPLOAD_RETRIES,
     GEMINI_STT_UPLOAD_RETRY_DELAY,
+    RESULTS_DIR,
 )
 from benchmark.llm_client import get_chat_model
 from benchmark.prompts import build_transcription_prompt
@@ -141,6 +142,41 @@ RESPONSE_SCHEMA = {
 }
 
 
+# ── Content extraction (Gemini 3+ list-based format) ───────────────────────
+
+
+def _extract_text_from_content(content) -> str:
+    """Extract plain text from LangChain response.content.
+
+    langchain-google-genai v4+ returns different formats depending on model version:
+      - Gemini 2.x: str (e.g. '{"task1_transcripts": [...]}')
+      - Gemini 3.x: list of content blocks
+        [{"type": "text", "text": "..."}, {"type": "thinking", "thinking": "..."}]
+
+    This function normalizes both to a plain text string, extracting only
+    "text" type blocks and ignoring "thinking" blocks.
+    """
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict):
+                if block.get("type") == "text" and "text" in block:
+                    text_parts.append(block["text"])
+                # Skip "thinking" blocks — they contain reasoning, not the JSON response
+        return "".join(text_parts)
+
+    # Fallback: coerce to string
+    return str(content)
+
+
 class GeminiEngine:
     """Transcription engine using Google Gemini models via unified LLM factory."""
 
@@ -218,34 +254,108 @@ class GeminiEngine:
         )
 
         logger.info("[Gemini] Calling get_chat_model('%s') via init_chat_model…", self.engine_key)
-        response = llm.invoke(
-            [message],
-            response_mime_type="application/json",
-            response_schema=RESPONSE_SCHEMA,
-        )
-        logger.info("[Gemini] LLM invoke returned successfully (engine=%s)", self.engine_key)
 
-        stt_time = time.time() - t0
+        # Retry up to 3 attempts for transient errors or invalid JSON
+        max_attempts = 3
+        parsed = None
+        raw_text = ""
 
-        # Parse response
-        raw_text = response.content or ""
-        parsed = repair_json(raw_text, return_objects=True)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = llm.invoke(
+                    [message],
+                    response_mime_type="application/json",
+                    response_schema=RESPONSE_SCHEMA,
+                )
+                logger.info(
+                    "[Gemini] LLM invoke returned successfully (engine=%s, attempt=%d/%d)",
+                    self.engine_key, attempt, max_attempts,
+                )
+                raw_content = response.content
+
+                # langchain-google-genai v4+ returns list-based content blocks
+                # for Gemini 3+ models (gemini-3.1-pro, gemini-3.5-flash).
+                # Format: [{"type": "text", "text": "..."}, ...]
+                # For Gemini 2.x models it returns a plain string.
+                raw_text = _extract_text_from_content(raw_content)
+
+                logger.debug(
+                    "[Gemini] response.content type=%s, extracted text length=%d, "
+                    "first 300 chars: %s",
+                    type(raw_content).__name__, len(raw_text), repr(raw_text[:300]),
+                )
+
+                # Handle empty response
+                if not raw_text.strip():
+                    logger.warning(
+                        "[Gemini] Empty response from model (attempt %d/%d, engine=%s)",
+                        attempt, max_attempts, self.engine_key,
+                    )
+                    parsed = None
+                    if attempt < max_attempts:
+                        time.sleep(5 * attempt)
+                    continue
+
+                # Try to repair and parse JSON
+                parsed = repair_json(raw_text, return_objects=True)
+
+                if isinstance(parsed, dict):
+                    # Validate expected keys exist
+                    if "task1_transcripts" not in parsed:
+                        logger.warning(
+                            "[Gemini] Response parsed as dict but missing 'task1_transcripts' "
+                            "(attempt %d/%d). Keys found: %s",
+                            attempt, max_attempts, list(parsed.keys()),
+                        )
+                        parsed = None
+                        if attempt < max_attempts:
+                            time.sleep(5 * attempt)
+                        continue
+                    break
+
+                # Log what we got instead
+                logger.warning(
+                    "[Gemini] Invalid JSON response (attempt %d/%d, engine=%s). "
+                    "Parsed type=%s. Raw (first 500 chars): %s",
+                    attempt, max_attempts, self.engine_key,
+                    type(parsed).__name__, raw_text[:500],
+                )
+                parsed = None
+                if attempt < max_attempts:
+                    time.sleep(5 * attempt)
+
+            except Exception as e:
+                if _is_non_retryable(e):
+                    raise
+                logger.warning(
+                    "[Gemini] Transcription error (attempt %d/%d): %s",
+                    attempt, max_attempts, e,
+                )
+                if attempt == max_attempts:
+                    raise
+                time.sleep(5 * attempt)
 
         if not isinstance(parsed, dict):
-            # Retry once
-            logger.warning("[Gemini] Invalid JSON response, retrying…")
-            response = llm.invoke(
-                [message],
-                response_mime_type="application/json",
-                response_schema=RESPONSE_SCHEMA,
+            # Dump last failed response to file for debugging
+            debug_path = RESULTS_DIR / f"debug_{self.engine_key}_last_failed_response.txt"
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(debug_path, "w", encoding="utf-8") as df:
+                df.write(f"Engine: {self.engine_key}\n")
+                df.write(f"Model: {self.model_id}\n")
+                df.write(f"Audio: {audio_path}\n")
+                df.write(f"Response length: {len(raw_text)}\n")
+                df.write(f"Response type after repair_json: {type(parsed).__name__}\n")
+                df.write("=" * 60 + "\n")
+                df.write(raw_text)
+            logger.error(
+                "[Gemini] Failed response dumped to: %s", debug_path,
             )
-            raw_text = response.content or ""
-            parsed = repair_json(raw_text, return_objects=True)
-            if not isinstance(parsed, dict):
-                raise RuntimeError(
-                    f"Gemini returned invalid JSON on all attempts. "
-                    f"Last response (first 500 chars): {raw_text[:500]}"
-                )
+            raise RuntimeError(
+                f"Gemini returned invalid JSON after {max_attempts} attempts. "
+                f"Last response (first 500 chars): {raw_text[:500]}"
+            )
+
+        stt_time = time.time() - t0
 
         # Extract and normalize
         transcripts = parsed.get("task1_transcripts", [])
