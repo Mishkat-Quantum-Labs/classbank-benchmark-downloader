@@ -29,6 +29,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+whisperx = [
+    "whisperx>=3.3.0",
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+]
+dicow = [
+    "transformers>=4.40.0",
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+    "diarizen>=0.1.0",
+]
+local = [
+    "whisperx>=3.3.0",
+    "transformers>=4.40.0",
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+    "diarizen>=0.1.0",
+]
 dev = [
     "pytest>=7.0.0",
     "hypothesis>=6.0.0",

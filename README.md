@@ -85,11 +85,18 @@ After this you'll have:
 ├── benchmark/                    # ASR benchmarking package
 │   ├── config.py                 # Engine settings, API keys
 │   ├── engines/                  # STT engine implementations
-│   │   ├── gemini_engine.py
-│   │   └── elevenlabs_engine.py
-│   ├── evaluation.py             # WER/CER metrics
+│   │   ├── gemini_engine.py      # Gemini 2.5 Pro / 3.1 Pro / 3.5 Flash
+│   │   ├── elevenlabs_engine.py  # ElevenLabs Scribe v2
+│   │   ├── whisperx_engine.py    # WhisperX (Whisper large-v3 + Pyannote)
+│   │   └── dicow_engine.py       # DiCoW v3 MLC (diarization-conditioned Whisper)
+│   ├── evaluation.py             # WER/CER metrics (HF Leaderboard style)
+│   ├── diarization.py            # DER metrics (pyannote.metrics)
+│   ├── statistics.py             # Aggregation & reporting
 │   ├── llm_client.py             # LLM for speaker classification
 │   └── prompts.py                # Prompt templates
+│
+├── docs/                         # Documentation
+│   └── local-models-setup.md     # Guide for running open-source models locally
 │
 ├── preprocess_transcripts.py     # CHA→JSON conversion + verification
 │
@@ -186,3 +193,26 @@ Data shared under [CC BY-NC-SA 3.0](https://creativecommons.org/licenses/by-nc-s
 MacWhinney, B. (2000). The CHILDES Project: Tools for Analyzing Talk (3rd ed.).
 Mahwah, NJ: Lawrence Erlbaum Associates.
 ```
+
+## Running Open-Source Models Locally
+
+In addition to the cloud-based engines (Gemini, ElevenLabs), this benchmark supports two open-source models that run locally with **code-switching** and **speaker diarization**:
+
+| Engine | Model | Code-Switching | Diarization | Install |
+|--------|-------|---------------|-------------|---------|
+| WhisperX | Whisper large-v3 + Pyannote | ✅ 99 languages | ✅ Post-hoc | `pip install -e ".[whisperx]"` |
+| DiCoW | DiCoW v3 MLC + DiariZen | ✅ 99 languages | ✅ Conditioned | `pip install -e ".[dicow]"` |
+
+Quick start:
+```bash
+# Install both
+pip install -e ".[local]"
+
+# Set HuggingFace token (required for diarization)
+set HF_TOKEN=hf_your_token_here
+
+# Run local benchmark
+python run_benchmark_local.py
+```
+
+See **[docs/local-models-setup.md](docs/local-models-setup.md)** for full setup guide, model download details, and troubleshooting.
