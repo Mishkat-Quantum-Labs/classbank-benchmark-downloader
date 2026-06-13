@@ -38,14 +38,14 @@ dicow = [
     "transformers>=4.40.0",
     "torch>=2.1.0",
     "torchaudio>=2.1.0",
-    "diarizen>=0.1.0",
+    "diarizen @ git+https://github.com/BUTSpeechFIT/DiariZen.git",
 ]
 local = [
     "whisperx>=3.3.0",
     "transformers>=4.40.0",
     "torch>=2.1.0",
     "torchaudio>=2.1.0",
-    "diarizen>=0.1.0",
+    "diarizen @ git+https://github.com/BUTSpeechFIT/DiariZen.git",
 ]
 dev = [
     "pytest>=7.0.0",
