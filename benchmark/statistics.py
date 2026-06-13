@@ -1,109 +1,65 @@
-"""Statistical analysis — bootstrap CI, pairwise tests, aggregate reports."""
+"""Aggregate reports — HF ASR Leaderboard style.
+
+Single WER number per engine, computed across all utterances in one jiwer call.
+Per-corpus breakdown uses the same approach.
+"""
 
 import numpy as np
-from scipy.stats import wilcoxon
 
-from benchmark.evaluation import EngineReport, FileMetrics
-
-
-def bootstrap_ci(values: list[float], n_iterations: int = 1000, ci: float = 0.95) -> tuple[float, float]:
-    """Bootstrap confidence interval."""
-    if len(values) < 2:
-        mean = float(np.mean(values)) if values else 0.0
-        return (mean, mean)
-
-    rng = np.random.default_rng(seed=42)
-    arr = np.array(values)
-    boot_means = np.array([
-        np.mean(rng.choice(arr, size=len(arr), replace=True))
-        for _ in range(n_iterations)
-    ])
-
-    alpha = (1 - ci) / 2
-    return (
-        round(float(np.percentile(boot_means, alpha * 100)), 4),
-        round(float(np.percentile(boot_means, (1 - alpha) * 100)), 4),
-    )
+from benchmark.evaluation import EngineReport, FileResult, compute_wer, compute_cer
 
 
-def pairwise_comparison(system_a_wers: list[float], system_b_wers: list[float]) -> dict:
-    """Wilcoxon signed-rank test between two engines."""
-    if len(system_a_wers) != len(system_b_wers):
-        raise ValueError("Both systems must have same number of results")
+def compute_engine_report(
+    file_results: list[FileResult],
+    engine: str,
+    total_attempted: int,
+) -> EngineReport:
+    """Aggregate file results into engine report (HF Leaderboard style).
 
-    if len(system_a_wers) < 10:
-        return {"statistic": None, "p_value": None, "significant": False,
-                "note": "Too few samples (need >=10)"}
-
-    if all(a == b for a, b in zip(system_a_wers, system_b_wers)):
-        return {"statistic": 0.0, "p_value": 1.0, "significant": False,
-                "note": "No differences between systems"}
-
-    stat, p_value = wilcoxon(system_a_wers, system_b_wers)
-    return {
-        "statistic": float(stat),
-        "p_value": float(p_value),
-        "significant": p_value < 0.05,
-    }
-
-
-def compute_engine_report(file_metrics: list[FileMetrics], engine: str, total_attempted: int) -> EngineReport:
-    """Aggregate per-file metrics into engine-level report."""
+    WER = jiwer.wer(all_references, all_hypotheses) in one call.
+    """
     report = EngineReport(
         engine=engine,
         total_files=total_attempted,
-        successful_files=len(file_metrics),
-        failed_files=total_attempted - len(file_metrics),
-        file_metrics=file_metrics,
+        successful_files=len(file_results),
+        failed_files=total_attempted - len(file_results),
+        file_results=file_results,
     )
 
-    if not file_metrics:
+    if not file_results:
         return report
 
-    wers = [m.wer for m in file_metrics]
-    cers = [m.cer for m in file_metrics]
+    # ── Corpus-level WER (HF style: one jiwer call across all files) ───
+    all_refs = [f.normalized_reference for f in file_results]
+    all_hyps = [f.normalized_hypothesis for f in file_results]
 
-    report.mean_wer = round(float(np.mean(wers)), 4)
-    report.median_wer = round(float(np.median(wers)), 4)
-    report.std_wer = round(float(np.std(wers)), 4)
-    report.mean_cer = round(float(np.mean(cers)), 4)
-    report.median_cer = round(float(np.median(cers)), 4)
+    report.wer = round(compute_wer(all_refs, all_hyps), 4)
+    report.cer = round(compute_cer(all_refs, all_hyps), 4)
 
-    ci_lower, ci_upper = bootstrap_ci(wers)
-    report.ci_95_lower = ci_lower
-    report.ci_95_upper = ci_upper
+    # ── Timing ─────────────────────────────────────────────────────────
+    report.total_stt_time = round(sum(f.stt_time for f in file_results), 2)
+    report.total_audio_duration = round(sum(f.audio_duration for f in file_results), 2)
+    if report.total_stt_time > 0:
+        report.rtfx = round(report.total_audio_duration / report.total_stt_time, 1)
 
-    rtfs = [m.rtf for m in file_metrics if m.rtf > 0]
-    report.mean_rtf = round(float(np.mean(rtfs)), 4) if rtfs else 0.0
-    report.total_stt_time = round(sum(m.stt_time for m in file_metrics), 2)
-    report.total_audio_duration = round(sum(m.audio_duration for m in file_metrics), 2)
-
-    report.total_insertions = sum(m.insertions for m in file_metrics)
-    report.total_deletions = sum(m.deletions for m in file_metrics)
-    report.total_substitutions = sum(m.substitutions for m in file_metrics)
-
-    sem_wers = [m.semantic_wer for m in file_metrics if m.semantic_wer is not None]
-    if sem_wers:
-        report.mean_semantic_wer = round(float(np.mean(sem_wers)), 4)
-        report.median_semantic_wer = round(float(np.median(sem_wers)), 4)
-
-    ders = [m.der for m in file_metrics if m.der is not None]
+    # ── DER ────────────────────────────────────────────────────────────
+    ders = [f.der for f in file_results if f.der is not None]
     if ders:
         report.mean_der = round(float(np.mean(ders)), 4)
-        report.median_der = round(float(np.median(ders)), 4)
 
-    corpus_metrics: dict[str, list[float]] = {}
-    for m in file_metrics:
-        corpus_metrics.setdefault(m.corpus, []).append(m.wer)
+    # ── Per-corpus WER breakdown ───────────────────────────────────────
+    corpus_files: dict[str, list[FileResult]] = {}
+    for f in file_results:
+        corpus_files.setdefault(f.corpus, []).append(f)
 
-    report.corpus_wer = {
-        corpus: {
-            "mean_wer": round(float(np.mean(w)), 4),
-            "median_wer": round(float(np.median(w)), 4),
-            "count": len(w),
+    report.corpus_wer = {}
+    for corpus, files in sorted(corpus_files.items()):
+        refs = [f.normalized_reference for f in files]
+        hyps = [f.normalized_hypothesis for f in files]
+        report.corpus_wer[corpus] = {
+            "wer": round(compute_wer(refs, hyps), 4),
+            "files": len(files),
         }
-        for corpus, w in sorted(corpus_metrics.items())
-    }
 
     return report
 
@@ -115,41 +71,22 @@ def report_to_dict(report: EngineReport) -> dict:
         "total_files": report.total_files,
         "successful_files": report.successful_files,
         "failed_files": report.failed_files,
-        "mean_wer": report.mean_wer,
-        "median_wer": report.median_wer,
-        "std_wer": report.std_wer,
-        "ci_95": [report.ci_95_lower, report.ci_95_upper],
-        "mean_cer": report.mean_cer,
-        "median_cer": report.median_cer,
-        "mean_semantic_wer": report.mean_semantic_wer,
-        "median_semantic_wer": report.median_semantic_wer,
-        "mean_der": report.mean_der,
-        "median_der": report.median_der,
-        "mean_rtf": report.mean_rtf,
+        "wer": report.wer,
+        "cer": report.cer,
+        "rtfx": report.rtfx,
         "total_stt_time_sec": report.total_stt_time,
         "total_audio_duration_sec": report.total_audio_duration,
-        "error_breakdown": {
-            "total_insertions": report.total_insertions,
-            "total_deletions": report.total_deletions,
-            "total_substitutions": report.total_substitutions,
-        },
+        "mean_der": report.mean_der,
         "corpus_wer": report.corpus_wer,
         "per_file": [
             {
-                "file_id": m.file_id,
-                "corpus": m.corpus,
-                "wer": m.wer,
-                "cer": m.cer,
-                "semantic_wer": m.semantic_wer,
-                "der": m.der,
-                "insertions": m.insertions,
-                "deletions": m.deletions,
-                "substitutions": m.substitutions,
-                "reference_words": m.reference_words,
-                "hypothesis_words": m.hypothesis_words,
-                "stt_time": m.stt_time,
-                "rtf": m.rtf,
+                "file_id": f.file_id,
+                "corpus": f.corpus,
+                "wer": round(compute_wer([f.normalized_reference], [f.normalized_hypothesis]), 4),
+                "der": f.der,
+                "stt_time": f.stt_time,
+                "audio_duration": f.audio_duration,
             }
-            for m in report.file_metrics
+            for f in report.file_results
         ],
     }

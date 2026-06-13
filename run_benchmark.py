@@ -25,7 +25,7 @@ import json
 import logging
 import sys
 import time
-from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from tqdm import tqdm
@@ -37,13 +37,10 @@ from benchmark.config import (
     PARSED_DIR,
     RESULTS_DIR,
 )
-from benchmark.evaluation import FileMetrics, compute_file_metrics
-from benchmark.semantic_wer import compute_semantic_wer
+from benchmark.evaluation import FileResult, normalize_text
 from benchmark.diarization import compute_diarization_error_rate
 from benchmark.statistics import (
-    bootstrap_ci,
     compute_engine_report,
-    pairwise_comparison,
     report_to_dict,
 )
 
@@ -136,60 +133,82 @@ def get_engine(engine_key: str):
 # ── Transcription Stage ─────────────────────────────────────────────────────
 
 
+def _transcribe_single_file(
+    engine_key: str,
+    corpus: str,
+    media_path: Path,
+) -> tuple[bool, str, str | None]:
+    """Transcribe a single file. Returns (success, file_id, error_msg)."""
+    output_dir = RESULTS_DIR / engine_key
+    corpus_output_dir = output_dir / corpus
+    corpus_output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = corpus_output_dir / f"{media_path.stem}.json"
+    file_id = f"{corpus}/{media_path.name}"
+
+    # Skip if already transcribed
+    if output_path.exists():
+        logger.debug("Already transcribed: %s — skipping", file_id)
+        return (True, file_id, None)
+
+    try:
+        engine = get_engine(engine_key)
+        result = engine.transcribe(str(media_path))
+
+        # Save hypothesis JSON
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+        logger.info(
+            "[%s] ✓ %s (%.1fs, %d segments)",
+            engine_key,
+            file_id,
+            result.get("stt_time", 0),
+            len(result.get("segments", [])),
+        )
+        return (True, file_id, None)
+
+    except Exception as e:
+        logger.error("[%s] ✗ %s — %s", engine_key, file_id, e)
+        return (False, file_id, str(e))
+
+
 def run_transcription(
     engine_key: str,
     files: list[tuple[str, Path]],
+    max_workers: int = 4,
 ) -> int:
-    """Run an STT engine on all media files and save hypothesis JSONs.
+    """Run an STT engine on all media files in parallel and save hypothesis JSONs.
 
     Args:
         engine_key: Engine identifier.
         files: List of (corpus, media_path) tuples.
+        max_workers: Max concurrent transcription requests per engine.
 
     Returns:
         Number of successfully transcribed files.
     """
-    engine = get_engine(engine_key)
     output_dir = RESULTS_DIR / engine_key
     output_dir.mkdir(parents=True, exist_ok=True)
 
     success_count = 0
     errors = []
 
-    for corpus, media_path in tqdm(files, desc=f"[{engine_key}] Transcribing", unit="file"):
-        # Create corpus subdirectory
-        corpus_output_dir = output_dir / corpus
-        corpus_output_dir.mkdir(parents=True, exist_ok=True)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_transcribe_single_file, engine_key, corpus, media_path): (corpus, media_path)
+            for corpus, media_path in files
+        }
 
-        output_path = corpus_output_dir / f"{media_path.stem}.json"
-
-        # Skip if already transcribed
-        if output_path.exists():
-            logger.debug("Already transcribed: %s/%s — skipping", corpus, media_path.name)
-            success_count += 1
-            continue
-
-        try:
-            result = engine.transcribe(str(media_path))
-
-            # Save hypothesis JSON
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-                f.write("\n")
-
-            success_count += 1
-            logger.info(
-                "[%s] ✓ %s/%s (%.1fs, %d segments)",
-                engine_key,
-                corpus,
-                media_path.name,
-                result.get("stt_time", 0),
-                len(result.get("segments", [])),
-            )
-
-        except Exception as e:
-            errors.append((f"{corpus}/{media_path.name}", str(e)))
-            logger.error("[%s] ✗ %s/%s — %s", engine_key, corpus, media_path.name, e)
+        with tqdm(total=len(futures), desc=f"[{engine_key}] Transcribing", unit="file") as pbar:
+            for future in as_completed(futures):
+                success, file_id, error_msg = future.result()
+                if success:
+                    success_count += 1
+                else:
+                    errors.append((file_id, error_msg))
+                pbar.update(1)
 
     # Write error log
     if errors:
@@ -210,6 +229,9 @@ def run_evaluation(
 ) -> dict:
     """Evaluate an engine's hypothesis transcripts against ground truth.
 
+    HF ASR Leaderboard style: normalizes all texts, then computes one WER
+    across all utterances in a single jiwer call.
+
     Args:
         engine_key: Engine identifier.
         files: List of (corpus, media_path) tuples.
@@ -222,7 +244,7 @@ def run_evaluation(
         logger.error("No hypothesis results found for engine '%s'", engine_key)
         return {}
 
-    file_metrics: list[FileMetrics] = []
+    file_results: list[FileResult] = []
     skipped = 0
 
     for corpus, media_path in tqdm(files, desc=f"[{engine_key}] Evaluating", unit="file"):
@@ -251,43 +273,47 @@ def run_evaluation(
                 seg.get("text", "") for seg in hypothesis["segments"]
             )
 
+        # Normalize both (HF style: Whisper EnglishTextNormalizer)
+        norm_ref = normalize_text(ref_text)
+        norm_hyp = normalize_text(hyp_text)
+
+        # Skip if empty reference after normalization
+        if not norm_ref.strip():
+            skipped += 1
+            continue
+
         # Get timing info
         stt_time = hypothesis.get("stt_time", 0.0)
         audio_duration = ground_truth.get("metadata", {}).get("duration_seconds", 0.0)
 
-        # Compute metrics
+        # Build file result
         file_id = f"{corpus}/{media_path.stem}"
-        metrics = compute_file_metrics(
-            reference_text=ref_text,
-            hypothesis_text=hyp_text,
+        result = FileResult(
             file_id=file_id,
             corpus=corpus,
+            normalized_reference=norm_ref,
+            normalized_hypothesis=norm_hyp,
             stt_time=stt_time,
             audio_duration=audio_duration,
         )
 
-        if metrics:
-            # Compute Semantic WER (uses Claude Sonnet 4.5 if API key set)
-            metrics.semantic_wer = compute_semantic_wer(ref_text, hyp_text)
+        # Compute DER if both have segments
+        ref_segments = ground_truth.get("segments", [])
+        hyp_segments = hypothesis.get("segments", [])
+        if ref_segments and hyp_segments:
+            result.der = compute_diarization_error_rate(ref_segments, hyp_segments)
 
-            # Compute DER if both have segments
-            ref_segments = ground_truth.get("segments", [])
-            hyp_segments = hypothesis.get("segments", [])
-            if ref_segments and hyp_segments:
-                metrics.der = compute_diarization_error_rate(ref_segments, hyp_segments)
+        file_results.append(result)
 
-            file_metrics.append(metrics)
-
-    # Compute aggregate report
+    # Compute aggregate report (single WER across all files)
     total_attempted = len(files) - skipped
-    report = compute_engine_report(file_metrics, engine_key, total_attempted)
+    report = compute_engine_report(file_results, engine_key, total_attempted)
 
     logger.info(
-        "[%s] Evaluation complete: %d files, mean WER=%.2f%%, median WER=%.2f%%",
+        "[%s] Evaluation complete: %d files, WER=%.2f%%",
         engine_key,
         report.successful_files,
-        report.mean_wer * 100,
-        report.median_wer * 100,
+        report.wer * 100,
     )
 
     return report_to_dict(report)
@@ -297,21 +323,21 @@ def run_evaluation(
 
 
 def generate_comparison_report(engine_reports: dict[str, dict]) -> dict:
-    """Generate a cross-engine comparison report with statistical tests.
+    """Generate a cross-engine comparison report.
 
     Args:
         engine_reports: Dict mapping engine_key → report dict.
 
     Returns:
-        Comparison report dict with rankings and pairwise tests.
+        Comparison report dict with rankings by WER.
     """
     if len(engine_reports) < 2:
         return {"note": "Need at least 2 engines for comparison"}
 
-    # Rank engines by mean WER
+    # Rank engines by WER (HF style — single number)
     rankings = sorted(
         engine_reports.items(),
-        key=lambda x: x[1].get("mean_wer", 1.0),
+        key=lambda x: x[1].get("wer", 1.0),
     )
 
     comparison = {
@@ -319,47 +345,13 @@ def generate_comparison_report(engine_reports: dict[str, dict]) -> dict:
             {
                 "rank": i + 1,
                 "engine": key,
-                "mean_wer": report.get("mean_wer", 0),
-                "median_wer": report.get("median_wer", 0),
-                "ci_95": report.get("ci_95", [0, 0]),
-                "mean_cer": report.get("mean_cer", 0),
-                "mean_rtf": report.get("mean_rtf", 0),
+                "wer": report.get("wer", 0),
+                "cer": report.get("cer", 0),
+                "rtfx": report.get("rtfx", 0),
             }
             for i, (key, report) in enumerate(rankings)
         ],
-        "pairwise_tests": [],
     }
-
-    # Pairwise Wilcoxon tests
-    engine_keys = list(engine_reports.keys())
-    for i in range(len(engine_keys)):
-        for j in range(i + 1, len(engine_keys)):
-            key_a = engine_keys[i]
-            key_b = engine_keys[j]
-
-            # Get per-file WERs (need same files for comparison)
-            per_file_a = {
-                m["file_id"]: m["wer"]
-                for m in engine_reports[key_a].get("per_file", [])
-            }
-            per_file_b = {
-                m["file_id"]: m["wer"]
-                for m in engine_reports[key_b].get("per_file", [])
-            }
-
-            # Find common files
-            common_files = sorted(set(per_file_a.keys()) & set(per_file_b.keys()))
-            if len(common_files) < 10:
-                continue
-
-            wers_a = [per_file_a[f] for f in common_files]
-            wers_b = [per_file_b[f] for f in common_files]
-
-            test_result = pairwise_comparison(wers_a, wers_b)
-            test_result["system_a"] = key_a
-            test_result["system_b"] = key_b
-            test_result["common_files"] = len(common_files)
-            comparison["pairwise_tests"].append(test_result)
 
     return comparison
 
@@ -401,6 +393,12 @@ def main():
         default=None,
         help="Output directory for reports (default: benchmark_results/)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Max concurrent transcription requests per engine (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -439,13 +437,22 @@ def main():
     # ── Transcription Stage ─────────────────────────────────────────────
     if not args.evaluate_only:
         print("\n" + "=" * 60)
-        print("  STAGE 1: TRANSCRIPTION")
+        print("  STAGE 1: TRANSCRIPTION (parallel)")
         print("=" * 60)
 
-        for engine_key in engine_keys:
-            print(f"\n→ Running {ENGINES[engine_key]} ({engine_key})…")
-            success = run_transcription(engine_key, files)
-            print(f"  ✓ {success}/{len(files)} files transcribed")
+        def _run_engine(engine_key: str) -> tuple[str, int]:
+            """Run transcription for a single engine (all files in parallel)."""
+            success = run_transcription(engine_key, files, max_workers=args.workers)
+            return engine_key, success
+
+        # Run all engines concurrently
+        with ThreadPoolExecutor(max_workers=len(engine_keys)) as engine_executor:
+            engine_futures = {
+                engine_executor.submit(_run_engine, ek): ek for ek in engine_keys
+            }
+            for future in as_completed(engine_futures):
+                ek, success = future.result()
+                print(f"  ✓ {ENGINES[ek]} ({ek}): {success}/{len(files)} files transcribed")
 
     # ── Evaluation Stage ────────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -485,8 +492,7 @@ def main():
         print("  " + "-" * 50)
         for r in comparison.get("rankings", []):
             print(
-                f"  #{r['rank']} {r['engine']:25s} WER={r['mean_wer']*100:.2f}% "
-                f"(CI: [{r['ci_95'][0]*100:.2f}%, {r['ci_95'][1]*100:.2f}%])"
+                f"  #{r['rank']} {r['engine']:25s} WER={r['wer']*100:.2f}%"
             )
 
     # ── Summary ─────────────────────────────────────────────────────────

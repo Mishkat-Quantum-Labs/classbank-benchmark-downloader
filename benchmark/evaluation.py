@@ -1,4 +1,10 @@
-"""Core evaluation — text normalization, WER/CER computation, dataclasses."""
+"""Core evaluation — text normalization, WER/CER computation, dataclasses.
+
+WER methodology matches the HuggingFace Open ASR Leaderboard exactly:
+- Text normalization via OpenAI Whisper's EnglishTextNormalizer
+- WER computed using jiwer across all utterances (not per-file averaging)
+- Single WER number = jiwer.wer(all_references, all_hypotheses)
+"""
 
 import logging
 from dataclasses import dataclass, field
@@ -9,7 +15,7 @@ from whisper_normalizer.english import EnglishTextNormalizer
 
 logger = logging.getLogger("benchmark")
 
-# Industry-standard normalizer (same as OpenAI Whisper / ASR Leaderboard)
+# Industry-standard normalizer (same as OpenAI Whisper / HF ASR Leaderboard)
 _normalizer = EnglishTextNormalizer()
 
 
@@ -27,100 +33,77 @@ def normalize_text(text: str) -> str:
 
 
 @dataclass
-class FileMetrics:
-    """Metrics for a single file."""
+class FileResult:
+    """Per-file data collected during evaluation."""
 
     file_id: str
     corpus: str
-    wer: float
-    cer: float
-    insertions: int
-    deletions: int
-    substitutions: int
-    reference_words: int
-    hypothesis_words: int
+    normalized_reference: str
+    normalized_hypothesis: str
     stt_time: float = 0.0
     audio_duration: float = 0.0
-    rtf: float = 0.0
-    semantic_wer: float | None = None
     der: float | None = None
 
 
 @dataclass
 class EngineReport:
-    """Aggregated report for one engine."""
+    """Report for one engine — HF ASR Leaderboard style."""
 
     engine: str
     total_files: int
     successful_files: int
     failed_files: int
-    file_metrics: list[FileMetrics] = field(default_factory=list)
 
-    mean_wer: float = 0.0
-    median_wer: float = 0.0
-    std_wer: float = 0.0
-    ci_95_lower: float = 0.0
-    ci_95_upper: float = 0.0
-    mean_cer: float = 0.0
-    median_cer: float = 0.0
-    mean_rtf: float = 0.0
-    total_stt_time: float = 0.0
-    total_audio_duration: float = 0.0
+    # Primary metric (HF style): single WER across all utterances
+    wer: float = 0.0
+    cer: float = 0.0
 
-    total_insertions: int = 0
-    total_deletions: int = 0
-    total_substitutions: int = 0
-
-    mean_semantic_wer: float | None = None
-    median_semantic_wer: float | None = None
-    mean_der: float | None = None
-    median_der: float | None = None
-
+    # Per-corpus WER breakdown
     corpus_wer: dict = field(default_factory=dict)
 
+    # Timing
+    total_stt_time: float = 0.0
+    total_audio_duration: float = 0.0
+    rtfx: float = 0.0
 
-def compute_file_metrics(
-    reference_text: str,
-    hypothesis_text: str,
-    file_id: str,
-    corpus: str,
-    stt_time: float = 0.0,
-    audio_duration: float = 0.0,
-    **kwargs,
-) -> Optional[FileMetrics]:
-    """Compute WER/CER for a single file."""
-    ref = normalize_text(reference_text)
-    hyp = normalize_text(hypothesis_text)
+    # DER (if applicable)
+    mean_der: float | None = None
 
-    if not ref:
-        logger.warning("[Eval] Empty reference for %s — skipping", file_id)
-        return None
+    # Per-file details
+    file_results: list[FileResult] = field(default_factory=list)
 
-    if not hyp:
-        ref_words = len(ref.split())
-        return FileMetrics(
-            file_id=file_id, corpus=corpus,
-            wer=1.0, cer=1.0,
-            insertions=0, deletions=ref_words, substitutions=0,
-            reference_words=ref_words, hypothesis_words=0,
-            stt_time=stt_time, audio_duration=audio_duration,
-            rtf=stt_time / audio_duration if audio_duration > 0 else 0.0,
-        )
 
-    wer_out = jiwer.process_words(ref, hyp)
-    cer_out = jiwer.process_characters(ref, hyp)
+def compute_wer(references: list[str], hypotheses: list[str]) -> float:
+    """Compute WER exactly like HF ASR Leaderboard.
 
-    ref_words = wer_out.hits + wer_out.substitutions + wer_out.deletions
-    hyp_words = wer_out.hits + wer_out.substitutions + wer_out.insertions
-    rtf = stt_time / audio_duration if audio_duration > 0 else 0.0
+    Passes all references and hypotheses as lists to jiwer in one call.
+    This gives a single corpus-level WER number.
+    """
+    if not references or not hypotheses:
+        return 0.0
 
-    return FileMetrics(
-        file_id=file_id, corpus=corpus,
-        wer=wer_out.wer, cer=cer_out.cer,
-        insertions=wer_out.insertions,
-        deletions=wer_out.deletions,
-        substitutions=wer_out.substitutions,
-        reference_words=ref_words,
-        hypothesis_words=hyp_words,
-        stt_time=stt_time, audio_duration=audio_duration, rtf=rtf,
-    )
+    # Filter out empty references (jiwer requires non-empty)
+    pairs = [(r, h) for r, h in zip(references, hypotheses) if r.strip()]
+    if not pairs:
+        return 0.0
+
+    refs, hyps = zip(*pairs)
+    # Replace empty hypotheses with a space (jiwer requirement)
+    hyps = [h if h.strip() else " " for h in hyps]
+
+    return jiwer.wer(list(refs), list(hyps))
+
+
+def compute_cer(references: list[str], hypotheses: list[str]) -> float:
+    """Compute CER across all utterances."""
+    if not references or not hypotheses:
+        return 0.0
+
+    pairs = [(r, h) for r, h in zip(references, hypotheses) if r.strip()]
+    if not pairs:
+        return 0.0
+
+    refs, hyps = zip(*pairs)
+    hyps = [h if h.strip() else " " for h in hyps]
+
+    return jiwer.cer(list(refs), list(hyps))
