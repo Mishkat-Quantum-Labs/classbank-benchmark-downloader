@@ -16,11 +16,13 @@ Requires:
 import argparse
 import json
 import logging
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from benchmark.config import PARSED_DIR, MEDIA_DIR, RESULTS_DIR
+from benchmark.diarization import compute_diarization_error_rate
 from benchmark.evaluation import normalize_text, compute_wer, FileResult
 from benchmark.statistics import compute_engine_report, report_to_dict
 
@@ -40,6 +42,30 @@ def find_media_file(corpus: str, stem: str) -> str | None:
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def get_audio_duration(media_path: str) -> float:
+    """Get audio duration in seconds using ffprobe.
+
+    Falls back to 0.0 if ffprobe is not available or fails.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                media_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return 0.0
 
 
 def run_engine_benchmark(engine, engine_name: str, corpora: list[str]) -> dict:
@@ -87,6 +113,9 @@ def run_engine_benchmark(engine, engine_name: str, corpora: list[str]) -> dict:
                 logger.error("  ✗ Failed %s: %s", file_id, e)
                 continue
 
+            # Get audio duration
+            audio_duration = get_audio_duration(media_path)
+
             # Build hypothesis text
             hypothesis_text = " ".join(
                 seg["text"] for seg in result.get("segments", [])
@@ -96,11 +125,20 @@ def run_engine_benchmark(engine, engine_name: str, corpora: list[str]) -> dict:
             norm_ref = normalize_text(reference_text)
             norm_hyp = normalize_text(hypothesis_text)
 
+            # Compute DER (speaker diarization accuracy)
+            ref_segments = ground_truth.get("segments", [])
+            hyp_segments = result.get("segments", [])
+            der = compute_diarization_error_rate(ref_segments, hyp_segments)
+
             # Compute per-file WER for logging
             per_file_wer = compute_wer([norm_ref], [norm_hyp])
             logger.info(
-                "  ✓ %s — WER: %.2f%% | Speakers: %d | Time: %.1fs",
-                file_id, per_file_wer * 100, result.get("speakers", 0),
+                "  ✓ %s — WER: %.2f%% | DER: %s | Speakers: %d | "
+                "Audio: %.1fs | STT: %.1fs",
+                file_id, per_file_wer * 100,
+                f"{der * 100:.2f}%" if der is not None else "N/A",
+                result.get("speakers", 0),
+                audio_duration,
                 result.get("stt_time", 0),
             )
 
@@ -110,8 +148,8 @@ def run_engine_benchmark(engine, engine_name: str, corpora: list[str]) -> dict:
                 normalized_reference=norm_ref,
                 normalized_hypothesis=norm_hyp,
                 stt_time=result.get("stt_time", 0),
-                audio_duration=0,
-                der=None,
+                audio_duration=audio_duration,
+                der=der,
             ))
 
     # Aggregate report
@@ -231,15 +269,22 @@ def main():
     print("BENCHMARK COMPLETE")
     print("=" * 60)
     for engine_name, report in results.items():
+        total_audio_min = report.get("total_audio_duration_sec", 0) / 60
+        total_stt_min = report.get("total_stt_time_sec", 0) / 60
         print(f"\n  {engine_name}:")
-        print(f"    WER:  {report['wer'] * 100:.2f}%")
-        print(f"    CER:  {report['cer'] * 100:.2f}%")
-        print(f"    Files: {report['successful_files']}/{report['total_files']}")
+        print(f"    WER:            {report['wer'] * 100:.2f}%")
+        print(f"    CER:            {report['cer'] * 100:.2f}%")
+        print(f"    DER (mean):     {report['mean_der'] * 100:.2f}%" if report.get('mean_der') else "    DER (mean):     N/A")
+        print(f"    RTFx:           {report['rtfx']:.1f}x")
+        print(f"    Files:          {report['successful_files']}/{report['total_files']}")
+        print(f"    Total audio:    {total_audio_min:.1f} minutes")
+        print(f"    Total STT time: {total_stt_min:.1f} minutes")
         if report.get("corpus_wer"):
+            print(f"    Per-corpus:")
             for corpus, data in report["corpus_wer"].items():
-                print(f"    {corpus}: {data['wer'] * 100:.2f}% ({data['files']} files)")
+                print(f"      {corpus}: {data['wer'] * 100:.2f}% ({data['files']} files)")
 
-    print(f"\n  Total time: {total_time:.1f}s")
+    print(f"\n  Total wall time: {total_time:.1f}s ({total_time/60:.1f} min)")
     print(f"  Results saved to: {output_path}")
 
 
