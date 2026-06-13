@@ -36,7 +36,7 @@ TRANSCRIPTS_DIR: str = "dataset/transcripts/"
 PARSED_DIR: str = "dataset/parsed/"
 
 
-def extract_participants(reader: pylangacq.Reader) -> dict[str, str]:
+def extract_participants(reader) -> dict[str, str]:
     """Maps speaker codes to lowercase roles from @Participants header.
 
     Extracts participant entries from the Reader's participants data and maps
@@ -175,7 +175,7 @@ def generate_session_id(corpus: str, filename: str, file_path: Path) -> str:
 
 
 def transform_file(
-    reader: pylangacq.Reader, corpus: str, file_path: Path
+    reader, corpus: str, file_path: Path
 ) -> Optional[dict]:
     """Transforms parsed CHA data into target JSON schema.
 
@@ -289,7 +289,7 @@ def transform_file(
 
 
 def verify_conversion(
-    reader: pylangacq.Reader, output: dict, source_path: Path
+    reader, output: dict, source_path: Path
 ) -> dict:
     """Runs all verification checks, returns checks dict with status.
 
@@ -535,7 +535,7 @@ def classify_verification(checks: dict) -> tuple[str, list[str]]:
 # --- Parsing ---
 
 
-def parse_cha_file(file_path: Path) -> Optional[pylangacq.Reader]:
+def parse_cha_file(file_path: Path):
     """Parses a .cha file, returns Reader or None on failure.
 
     Opens the file with errors='replace' to handle encoding issues,
