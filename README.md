@@ -216,3 +216,9 @@ python run_benchmark_local.py
 ```
 
 See **[docs/local-models-setup.md](docs/local-models-setup.md)** for full setup guide, model download details, and troubleshooting.
+
+### Running on Google Colab (Free GPU)
+
+For the full step-by-step Colab notebook guide (GitHub auth → dataset download → benchmark), see:
+
+📓 **[docs/colab-setup-guide.md](docs/colab-setup-guide.md)**
